@@ -13,6 +13,8 @@ from collections import deque
 from typing import Dict, List, Optional
 
 from azure.search.documents import SearchClient, SearchItemPaged
+
+from src._utils import guideline_id_to_db, guideline_id_to_web
 from azure.search.documents.indexes import SearchIndexerClient
 from azure.search.documents.models import (
     QueryAnswerResult,
@@ -231,7 +233,7 @@ class ContextItem:
         """
         Processes the ID to convert the Search-compatible values with web-compatible ones.
         """
-        return id.replace("=html=", ".html#")
+        return guideline_id_to_web(id)
 
     def _metadata_markdown(self) -> str:
         """
@@ -378,7 +380,7 @@ class SearchManager:
         if not ids:
             return []
         # Convert IDs from web format (with .html#) to search format (with =html=)
-        search_ids = [id.replace(".html#", "=html=") for id in ids]
+        search_ids = [guideline_id_to_db(id) for id in ids]
         escaped = ",".join(id.replace("'", "''") for id in search_ids)
         filter_expr = f"search.in(id, '{escaped}', ',')"
         # Note: Don't apply language filter when searching by explicit IDs

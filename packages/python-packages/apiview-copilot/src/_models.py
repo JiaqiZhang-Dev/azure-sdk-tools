@@ -13,6 +13,8 @@ from enum import Enum
 from typing import Dict, List, Optional, Set
 
 from pydantic import BaseModel, Field, PrivateAttr
+
+from src._utils import guideline_id_to_web
 from src._sectioned_document import Section
 
 
@@ -301,7 +303,7 @@ class ReviewResult(BaseModel):
         super().__init__(comments=[])
 
         # sanitize allowed_ids to convert the search IDs to the proper format
-        allowed_ids = [x.replace("=html=", ".html#") for x in allowed_ids] if allowed_ids else None
+        allowed_ids = [guideline_id_to_web(x) for x in allowed_ids] if allowed_ids else None
 
         # initialize private attr outside of Pydantic’s field system
         object.__setattr__(

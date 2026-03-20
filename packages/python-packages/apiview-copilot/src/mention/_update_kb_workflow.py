@@ -12,6 +12,7 @@ from src._database_manager import DatabaseManager
 from src._models import Example, Guideline, Memory
 from src._prompt_runner import run_prompt
 from src._search_manager import SearchManager
+from src._utils import guideline_id_to_db
 
 from ._base import MentionWorkflow
 
@@ -46,6 +47,7 @@ class UpdateKnowledgeBaseWorkflow(MentionWorkflow):
                 prefix = "https://azure.github.io/azure-sdk/"
                 if guideline_id.startswith(prefix):
                     guideline_id = guideline_id[len(prefix) :]
+                guideline_id = guideline_id_to_db(guideline_id)
                 guideline = Guideline(**db_manager.guidelines.get(guideline_id))
                 guideline.related_memories.append(memory_id)
                 memory.related_guidelines.append(guideline_id)
