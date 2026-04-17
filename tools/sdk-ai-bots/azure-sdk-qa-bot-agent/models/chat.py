@@ -53,8 +53,6 @@ class ConversationItem(BaseModel):
     type: ConversationItemType = ConversationItemType.message
     role: Role
     content: str
-    user_id: str | None = None
-    user_name: str | None = None
 
 
 class AdditionalInfo(BaseModel):

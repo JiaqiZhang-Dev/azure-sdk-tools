@@ -22,7 +22,7 @@ parameters:
     default: default
     values:
       - default
-      - agent
+      - digital-avatar
 
 variables:
   - template: /eng/pipelines/templates/variables/globals.yml

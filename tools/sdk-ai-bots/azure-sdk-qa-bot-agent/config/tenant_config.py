@@ -34,6 +34,7 @@ class TenantID(str, Enum):
     AZURE_TYPESPEC_AUTHORING = "azure_typespec_authoring"
     API_SPEC_REVIEW_BOT = "api_spec_review_bot"
     AZURE_SDK_QA_BOT = "azure_sdk_qa_bot"
+    DIGITAL_AVATAR_JAY_PARIKH = "digital_avatar_jay_parikh"
 
 
 # ---------------------------------------------------------------------------
@@ -289,6 +290,10 @@ class TenantConfig:
     source_filter: dict[str, str] = field(default_factory=dict)
     qa_guideline_file: str = ""
     enable_routing: bool = False
+    prompt_agent_name: str = ""
+    """If set, ChatService calls this Foundry prompt agent directly and
+    skips tenant/memory system message injection and reference enrichment.
+    Use for pure-passthrough tenants backed by a portal-configured prompt agent."""
 
 
 # ---------------------------------------------------------------------------
@@ -537,6 +542,10 @@ _TENANT_CONFIG_MAP: dict[TenantID, TenantConfig] = {
         scope="Questions that don't clearly fit any single domain above. General specialist with all knowledge sources.",
         qa_guideline_file="tenants/general.md",
         enable_routing=True,
+    ),
+    TenantID.DIGITAL_AVATAR_JAY_PARIKH: TenantConfig(
+        display_name="Digital Avatar - Jay Parikh",
+        prompt_agent_name="jay-parikh-agent",
     ),
 }
 

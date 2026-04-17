@@ -11,6 +11,7 @@ from urllib.parse import urlparse
 
 from config.app_config import get as cfg
 from config.tenant_config import (
+    get_tenant_config,
     get_tenant_scope_description,
 )
 from models.chat import (
@@ -65,7 +66,14 @@ class ChatService:
         """Process one chat turn and return API response shape."""
         project_client = get_project_client()
 
-        agent = await self._get_agent(project_client)
+        # Prompt-agent tenants are pure passthroughs: they call a Foundry prompt
+        # agent directly and skip tenant/memory system-message injection and
+        # reference enrichment (the prompt agent is fully self-contained).
+        tenant_config = get_tenant_config(req.tenant_id)
+        prompt_agent_name = tenant_config.prompt_agent_name if tenant_config else ""
+        is_prompt_agent = bool(prompt_agent_name)
+
+        agent = await self._get_agent(project_client, prompt_agent_name)
         openai_client = get_openai_client()
 
         agent_conversation_id, is_new = await self._resolve_conversation(
@@ -105,8 +113,6 @@ class ChatService:
             ConversationItem(
                 role=req.message.role,
                 content=preprocess_message(req.message.content),
-                user_id=req.message.user_id,
-                user_name=req.message.user_name,
             ).model_dump(mode="json", exclude_none=True)
         )
 
@@ -241,9 +247,20 @@ class ChatService:
                 exc_info=True,
             )
 
-    async def _get_agent(self, project_client: AIProjectClient) -> AgentDetails:
-        """Load hosted-agent definition from Foundry."""
-        agent_name = cfg("AI_FOUNDRY_AGENT_NAME", "azure-sdk-qa-bot-chat-agent")
+    async def _get_agent(
+        self,
+        project_client: AIProjectClient,
+        agent_name_override: str = "",
+    ) -> AgentDetails:
+        """Load hosted-agent definition from Foundry.
+
+        If ``agent_name_override`` is provided (e.g. a tenant-configured prompt
+        agent name), that agent is resolved instead of the default hosted chat
+        agent.
+        """
+        agent_name = agent_name_override or cfg(
+            "AI_FOUNDRY_AGENT_NAME", "azure-sdk-qa-bot-chat-agent"
+        )
         agent = await project_client.agents.get(agent_name)
         if agent is None:
             raise RuntimeError(
@@ -342,9 +359,18 @@ class ChatService:
         return f"[memory_scope] value={memory_scope}"
 
     def _postprocess(
-        self, req: ChatRequest, response: OpenAIResponse, agent_conversation_id: str
+        self,
+        req: ChatRequest,
+        response: OpenAIResponse,
+        agent_conversation_id: str,
     ) -> ChatResponse:
-        """Map hosted-agent response to `ChatResponse`."""
+        """Map hosted-agent response to `ChatResponse`.
+
+        For prompt-agent tenants, tool-result extraction, reference enrichment,
+        and tenant-routing detection are skipped; the response text is returned
+        as-is (with citation artifacts stripped for safety).
+        """
+
         tool_results = self._extract_tool_results(response.output)
         search = tool_results.get("search_knowledge_base")
         tool_references = search.results if search else []
