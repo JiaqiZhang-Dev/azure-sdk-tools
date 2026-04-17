@@ -1,37 +1,21 @@
-import { createFeedbackCard } from './feedback.js';
-import { supportChannelCard } from './support-channel.js';
+import config from '../../config/config.js';
 
 export function createContactCard() {
-  const feedbackCard = createFeedbackCard();
-  const feedbackAction = {
-    type: 'Action.ShowCard',
-    title: '👍Feedback👎',
-    card: feedbackCard,
-  };
-  const supportChannelAction = {
-    type: 'Action.ShowCard',
-    title: '🕵️‍♂️Support Channels🕵️‍♀️',
-    card: supportChannelCard,
-  };
-  const actions = [feedbackAction, supportChannelAction];
   const card = {
     type: 'AdaptiveCard',
-    // adaptive card does not support FULL markdown in attachment, use message instead
     body: [
       {
         type: 'TextBlock',
-        text: '🤖 The following is AI-generated response. Please review before applying to production.',
+        text: '🤖 This bot is an informal digest of Jay Parikh\'s public statements; it may be incomplete and should not be treated as official guidance.',
         wrap: true,
       },
       {
         type: 'TextBlock',
-        text: '📝 The bot cannot respond further to messages with edits; reply with @ Azure SDK QA bot for follow-up.',
+        text: `📝 The bot cannot respond further to messages with edits; reply with @${config.botDisplayName} for follow-up.`,
         wrap: true,
       },
     ],
-    actions,
     $schema: 'http://adaptivecards.io/schemas/adaptive-card.json',
-    // Currently Microsoft Teams doesn't fully support version 1.6, use 1.5 to ensure compatibility
     version: '1.5',
   };
   return card;

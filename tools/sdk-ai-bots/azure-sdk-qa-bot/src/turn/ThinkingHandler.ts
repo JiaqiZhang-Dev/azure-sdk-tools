@@ -2,8 +2,7 @@ import { CardFactory, MessageFactory, TurnContext } from 'botbuilder';
 import { getTurnContextLogMeta } from '../logging/utils.js';
 import { ConversationHandler, ConversationMessage, Prompt, RAGReply } from '../input/ConversationHandler.js';
 import { createContactCard } from '../cards/components/contact.js';
-import { contactCardVersion } from '../config/config.js';
-import { TenantConfigManager } from '../config/tenant.js';
+import config, { contactCardVersion } from '../config/config.js';
 import { CompletionResponsePayload, isCompletionResponsePayload, RagApiError } from '../backend/rag.js';
 import { logger } from '../logging/logger.js';
 import { setTimeout } from 'node:timers/promises';
@@ -24,7 +23,6 @@ export class ThinkingHandler {
   private readonly defaultThinkingInterval = 5000; // unit in milliseconds
   private readonly context: TurnContext;
   private readonly conversationHandler: ConversationHandler;
-  private readonly tenantConfigManager: TenantConfigManager;
   private thinkingMessage = this.defaultThinkingMessage;
   private shouldStop = false;
   private isRunning = false;
@@ -34,12 +32,10 @@ export class ThinkingHandler {
   constructor(
     context: TurnContext,
     conversationHandler: ConversationHandler,
-    tenantConfigManager: TenantConfigManager
   ) {
     this.context = context;
     this.meta = getTurnContextLogMeta(context);
     this.conversationHandler = conversationHandler;
-    this.tenantConfigManager = tenantConfigManager;
   }
 
   public async start(conversationMessages: ConversationMessage[]): Promise<Date> {
@@ -68,9 +64,8 @@ export class ThinkingHandler {
   // separate this method from cancelTimer to make sure complete message is always shown
   public async stop(replyStartTime: Date, reply: CompletionResponsePayload | RagApiError, currentPrompt: Prompt) {
     const { answer, isError } = this.generateAnswer(reply);
-    const routeTenant = isCompletionResponsePayload(reply) ? reply.route_tenant : undefined;
     const responseId = isCompletionResponsePayload(reply) ? reply.id : undefined;
-    const formattedAnswer = await this.formatAnswer(answer, isError, routeTenant);
+    const formattedAnswer = await this.formatAnswer(answer, isError);
     const entity: Record<string, unknown> = {
       ...this.aiGeneratedEntity,
     };
@@ -117,33 +112,16 @@ export class ThinkingHandler {
   }
 
   /**
-   * Format the answer with conditional footer based on route_tenant.
+   * Format the answer with footer.
    * For error responses, returns the answer as-is without footer.
    */
-  private async formatAnswer(answer: string, isError: boolean, routeTenant?: string): Promise<string> {
+  private async formatAnswer(answer: string, isError: boolean): Promise<string> {
     // For error responses, return plain text without footer
     if (isError) {
       return answer;
     }
 
-    let footer = `💡 If you have follow-up questions after my response, please @Azure SDK Q&A Bot to continue the conversation.`;
-
-    if (routeTenant) {
-      try {
-        // Get channel info (name and url) from tenant ID
-        const tenant = this.tenantConfigManager.getTenant(routeTenant);
-        if (!tenant) {
-          logger.warn(`Tenant not found for route_tenant: ${routeTenant}`, { meta: this.meta });
-        } else {
-          const displayName = tenant.channel_name || routeTenant;
-          const channelLink = tenant.channel_link ? `[${displayName}](${tenant.channel_link})` : `${displayName}`;
-          const redirectText = `💬 Not resolved? Please re-post in the 👉 ${channelLink} channel where our domain experts can provide a deeper dive.`;
-          footer = `${redirectText}\n\n${footer}`;
-        }
-      } catch (error) {
-        logger.error(`Failed to get tenant info for route_tenant: ${routeTenant}`, { error: error.message, meta: this.meta });
-      }
-    }
+    const footer = `💡 If you have follow-up questions after my response, please @${config.botDisplayName} to continue the conversation.`;
 
     return `${answer}\n\n---\n\n${footer}`;
   }

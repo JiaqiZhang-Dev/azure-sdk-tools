@@ -5,23 +5,6 @@ import {
 } from '@azure/identity';
 import { logger } from '../logging/logger.js';
 
-const mentionLinkToIgnore = new URL('http://schema.skype.com/Mention');
-
-const caseInsensitiveHosts = ['github.com', 'dev.azure.com'];
-
-function normalizeUrl(link: string) {
-  const url = new URL(link);
-  if (caseInsensitiveHosts.includes(url.hostname)) {
-    url.pathname = url.pathname.toLowerCase();
-  }
-  return url.href;
-}
-
-export function getUniqueLinks(links: string[]): string[] {
-  const set = new Set<string>(links.map(normalizeUrl));
-  return Array.from(set).filter((link) => link !== mentionLinkToIgnore.href);
-}
-
 export function parseConversationId(id: string): { channelId: string; postId: string | undefined } {
   let postId: string | undefined;
   const parts = id.split(';');

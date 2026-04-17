@@ -3,7 +3,6 @@ import { ThinkingHandler } from '../src/turn/ThinkingHandler.js';
 import { ConversationHandler, Prompt } from '../src/input/ConversationHandler.js';
 import { CompletionResponsePayload, RagApiError, ErrorCode, ErrorCategory } from '../src/backend/rag.js';
 import { TurnContext } from 'botbuilder';
-import { TenantConfigManager } from '../src/config/tenant.js';
 
 // Mock dependencies
 vi.mock('../src/logging/utils.js', () => ({
@@ -34,7 +33,6 @@ describe('ThinkingHandler', () => {
   let thinkingHandler: ThinkingHandler;
   let mockContext: Partial<TurnContext>;
   let mockConversationHandler: Partial<ConversationHandler>;
-  let mockTenantConfigManager: Partial<TenantConfigManager>;
 
   beforeEach(() => {
     // Mock TurnContext
@@ -52,13 +50,9 @@ describe('ThinkingHandler', () => {
       saveMessage: vi.fn().mockResolvedValue({}),
     };
 
-    // Mock TenantConfigManager
-    mockTenantConfigManager = {};
-
     thinkingHandler = new ThinkingHandler(
       mockContext as TurnContext,
       mockConversationHandler as ConversationHandler,
-      mockTenantConfigManager as TenantConfigManager
     );
   });
 

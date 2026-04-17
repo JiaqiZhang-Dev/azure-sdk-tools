@@ -2,20 +2,11 @@
 @secure()
 param azureTableNameForConversation string
 
-// Azure Blob
-param blobContainerName string
-param channelConfigBlobName string
-param tenantConfigBlobName string
-
 // RAG
 @secure()
 param ragScope string
-
-// GitHub App
-param githubAppId string
-param githubAppKeyVaultName string
-param githubAppKeyName string
-param githubAppInstallOwner string
+param ragEndpoint string
+param ragTenantId string
 
 // Resources
 @maxLength(20)
@@ -34,7 +25,7 @@ param webAppSKU string
 param dockerImageTag string
 param dockerContainerName string
 param dockerRegistryUrl string = '${dockerContainerName}.azurecr.io'  // Use the ACR we create
-param dockerImageName string = '${dockerRegistryUrl}/azure-sdk-qa-bot:${dockerImageTag}'
+param dockerImageName string = '${dockerRegistryUrl}/jaydecoder:${dockerImageTag}'
 
 // Bot
 @maxLength(42)
@@ -52,19 +43,9 @@ resource identity 'Microsoft.ManagedIdentity/userAssignedIdentities@2023-01-31' 
   name: identityName
 }
 
-// Azure Container Registry
-resource acr 'Microsoft.ContainerRegistry/registries@2023-07-01' = {
-  name: resourceBaseName
-  location: location
-  sku: {
-    name: 'Standard'
-  }
-  properties: {
-    adminUserEnabled: false
-    publicNetworkAccess: 'Enabled'
-    networkRuleBypassOptions: 'AzureServices'
-    zoneRedundancy: 'Disabled'
-  }
+// Azure Container Registry (the one used for Docker image pulls)
+resource acr 'Microsoft.ContainerRegistry/registries@2023-07-01' existing = {
+  name: dockerContainerName
 }
 
 // Grant the managed identity AcrPull role on the container registry
@@ -141,10 +122,22 @@ resource webApp 'Microsoft.Web/sites@2021-02-01' = {
           name: 'BOT_TYPE'
           value: 'UserAssignedMsi'
         }
+        {
+          name: 'TEAMS_BOT_FULL_DISPLAY_NAME'
+          value: botDisplayName
+        }
         // RAG
         {
           name: 'RAG_SERVICE_SCOPE'
           value: ragScope
+        }
+        {
+          name: 'RAG_ENDPOINT'
+          value: ragEndpoint
+        }
+        {
+          name: 'RAG_TENANT_ID'
+          value: ragTenantId
         }
         // Azure Storage Account
         {
@@ -156,39 +149,9 @@ resource webApp 'Microsoft.Web/sites@2021-02-01' = {
           name: 'AZURE_TABLE_NAME_FOR_CONVERSATION'
           value: azureTableNameForConversation
         }
-        // Azure Blob
-        {
-          name: 'BLOB_CONTAINER_NAME'
-          value: blobContainerName
-        }
-        {
-          name: 'CHANNEL_CONFIG_BLOB_NAME'
-          value: channelConfigBlobName
-        }
-        {
-          name: 'TENANT_CONFIG_BLOB_NAME'
-          value: tenantConfigBlobName
-        }
         {
           name: 'AZURE_CLIENT_ID'
           value: identity.properties.clientId
-        }
-        // GitHub App
-        {
-          name: 'GITHUB_APP_ID'
-          value: githubAppId
-        }
-        {
-          name: 'GITHUB_APP_KEY_VAULT_NAME'
-          value: githubAppKeyVaultName
-        }
-        {
-          name: 'GITHUB_APP_KEY_NAME'
-          value: githubAppKeyName
-        }
-        {
-          name: 'GITHUB_APP_INSTALL_OWNER'
-          value: githubAppInstallOwner
         }
       ]
       ftpsState: 'FtpsOnly'
