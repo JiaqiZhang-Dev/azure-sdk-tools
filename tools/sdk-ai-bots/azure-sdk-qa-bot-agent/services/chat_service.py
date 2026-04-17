@@ -55,6 +55,14 @@ COMPACT_THRESHOLD = 100000
 
 _CITATION_RE = re.compile(r"[^\w\s]*cite[^\w\s]*turn\d+\S*")
 
+# Strips OpenAI file-search / retrieval citation markers such as:
+#   【25:1†source】, 【source】, 【25:5†filename.md】
+_SOURCE_MARKER_RE = re.compile(r"\u3010[^\u3011]*\u3011")
+
+# Strips dangling "†source" / "†filename" fragments that may survive
+# bracket removal from earlier passes.
+_DAGGER_MARKER_RE = re.compile(r"\u2020\S+")
+
 
 class ChatService:
     """Coordinates conversation state, hosted-agent invocation, and response mapping."""
@@ -388,8 +396,11 @@ class ChatService:
                 response.status,
             )
 
-        # Strip model citation artifacts (e.g. "citeturn0search0").
+        # Strip model citation artifacts (e.g. "citeturn0search0",
+        # "【25:1†source】", dangling "†source" fragments).
         output_text = _CITATION_RE.sub("", output_text)
+        output_text = _SOURCE_MARKER_RE.sub("", output_text)
+        output_text = _DAGGER_MARKER_RE.sub("", output_text)
 
         # Extract structured references from the agent's markdown output
         # and strip the references section from the answer text.
@@ -464,10 +475,18 @@ class ChatService:
             return None
 
         # Extract markdown links: - [title](link)
+        # Greedy title match tolerates nested brackets in the label
+        # (e.g. "[[Week 03] Title](url)"); the regex operates per-line
+        # because `.` does not match newlines by default.
         extracted: list[Reference] = []
-        for m in re.finditer(r"-\s*\[([^\]]+)\]\(([^)]+)\)", refs_block):
+        for m in re.finditer(r"-\s*\[(.+)\]\(([^)\s]+)\)", refs_block):
             title = m.group(1).strip()
-            link = m.group(2)
+            link = m.group(2).strip()
+            # Strip any residual citation markers that slipped into the
+            # title or link (e.g. "Title 【25:1†source】").
+            title = _SOURCE_MARKER_RE.sub("", title)
+            title = _DAGGER_MARKER_RE.sub("", title).strip()
+            link = _SOURCE_MARKER_RE.sub("", link).strip()
             matched = _match_reference(link, title)
             source = matched.source if matched else ""
             content = matched.content if matched else ""
