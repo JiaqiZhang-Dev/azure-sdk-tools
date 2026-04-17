@@ -16,9 +16,6 @@ export interface ContactCard {
   version: string;
 }
 
-/**
- * Interface representing a message in a conversation
- */
 export interface ConversationMessage {
   /**
    * The ID of the conversation the message belongs to
@@ -47,7 +44,7 @@ export interface ConversationMessage {
   prompt?: Prompt;
 
   /**
-   * Raw prompt information
+   * Contact card metadata
    */
   contactCard?: ContactCard;
 

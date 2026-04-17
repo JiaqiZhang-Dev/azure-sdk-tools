@@ -10,7 +10,7 @@ param(
     [Parameter(Mandatory=$true)]
     [string]$AcrName, # azure container registry 
     
-    [string]$ImageName = "azure-sdk-qa-bot"
+    [string]$ImageName = "jaydecoder"
 )
 
 # prepare node server

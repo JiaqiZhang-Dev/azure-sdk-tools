@@ -90,8 +90,6 @@ export function isCompletionResponsePayload(
   );
 }
 
-export type Reaction = 'good' | 'bad';
-
 // Error Code definitions
 export type ErrorCode =
   // Client Error Codes (4xx)
@@ -121,17 +119,6 @@ export interface RagApiError {
   code: ErrorCode;
   message: string;
   category: ErrorCategory;
-}
-
-// Feedback request interface
-export interface FeedbackRequestPayload {
-  channel_id?: string;
-  tenant_id: string;
-  reaction: Reaction;
-  comment?: string;
-  reasons?: string[];
-  link?: string;
-  user_name?: string;
 }
 
 // TODO: reuse function to post request to RAG backend
@@ -166,32 +153,5 @@ export async function getRAGReply(
   } catch (error) {
     logger.warn('Failed to get reply from RAG:', { error, meta });
     return undefined;
-  }
-}
-
-export async function sendFeedback(payload: FeedbackRequestPayload, options: RAGOptions, meta: object): Promise<void> {
-  logger.info(
-    `Post feedback to RAG on endpoint ${options.endpoint + ragApiPaths.feedback} with tenant ${
-      payload.tenant_id
-    } from user ${payload.user_name || 'unknown'}`,
-    { meta }
-  );
-  try {
-    let headers = {
-        'Content-Type': 'application/json; charset=utf-8',
-    };
-    if (options.accessToken) {
-        headers['Authorization'] = `Bearer ${options.accessToken}`
-    }
-    const response = await axios.post(options.endpoint + ragApiPaths.feedback, payload, {
-      headers: headers,
-    });
-    if (response.status !== 200) {
-      logger.warn(`Failed to fetch data from feedback backend. Status: ${response.status}`);
-    }
-    return;
-  } catch (error) {
-    logger.warn('Failed to send feedback:', { error, meta });
-    return;
   }
 }

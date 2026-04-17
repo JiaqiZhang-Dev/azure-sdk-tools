@@ -2,20 +2,10 @@
 @secure()
 param azureTableNameForConversation string
 
-// Azure Blob
-param blobContainerName string
-param channelConfigBlobName string
-param tenantConfigBlobName string
-
 // RAG
 @secure()
 param ragScope string
-
-// GitHub App
-param githubAppId string
-param githubAppKeyVaultName string
-param githubAppKeyName string
-param githubAppInstallOwner string
+param ragEndpoint string
 
 // Resources
 @maxLength(20)
@@ -146,6 +136,10 @@ resource webApp 'Microsoft.Web/sites@2021-02-01' = {
           name: 'RAG_SERVICE_SCOPE'
           value: ragScope
         }
+        {
+          name: 'RAG_ENDPOINT'
+          value: ragEndpoint
+        }
         // Azure Storage Account
         {
           name: 'STORAGE_ACCOUNT_NAME'
@@ -156,39 +150,9 @@ resource webApp 'Microsoft.Web/sites@2021-02-01' = {
           name: 'AZURE_TABLE_NAME_FOR_CONVERSATION'
           value: azureTableNameForConversation
         }
-        // Azure Blob
-        {
-          name: 'BLOB_CONTAINER_NAME'
-          value: blobContainerName
-        }
-        {
-          name: 'CHANNEL_CONFIG_BLOB_NAME'
-          value: channelConfigBlobName
-        }
-        {
-          name: 'TENANT_CONFIG_BLOB_NAME'
-          value: tenantConfigBlobName
-        }
         {
           name: 'AZURE_CLIENT_ID'
           value: identity.properties.clientId
-        }
-        // GitHub App
-        {
-          name: 'GITHUB_APP_ID'
-          value: githubAppId
-        }
-        {
-          name: 'GITHUB_APP_KEY_VAULT_NAME'
-          value: githubAppKeyVaultName
-        }
-        {
-          name: 'GITHUB_APP_KEY_NAME'
-          value: githubAppKeyName
-        }
-        {
-          name: 'GITHUB_APP_INSTALL_OWNER'
-          value: githubAppInstallOwner
         }
       ]
       ftpsState: 'FtpsOnly'
