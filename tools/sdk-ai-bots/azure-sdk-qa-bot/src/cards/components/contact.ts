@@ -1,15 +1,17 @@
+import config from '../../config/config.js';
+
 export function createContactCard() {
   const card = {
     type: 'AdaptiveCard',
     body: [
       {
         type: 'TextBlock',
-        text: '🤖 The following is AI-generated response that summarizes Jay Parikh\'s public talks/interviews for quick reference — not authored by Jay!',
+        text: '🤖 This bot is an informal digest of Jay Parikh\'s public statements; it may be incomplete and should not be treated as official guidance.',
         wrap: true,
       },
       {
         type: 'TextBlock',
-        text: '📝 The bot cannot respond further to messages with edits; reply with @Parikh Public Lens for follow-up.',
+        text: `📝 The bot cannot respond further to messages with edits; reply with @${config.botDisplayName} for follow-up.`,
         wrap: true,
       },
     ],

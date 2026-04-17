@@ -12,11 +12,14 @@ const config = {
   ragScope: process.env.RAG_SERVICE_SCOPE,
   // RAG backend
   ragEndpoint: process.env.RAG_ENDPOINT,
+  ragTenantId: process.env.RAG_TENANT_ID || 'digital_avatar_jay_parikh',
   // Azure Table Storage
   azureStorageUrl: storageAccountName ? `https://${storageAccountName}.table.core.windows.net/` : undefined,
   azureTableNameForConversation: process.env.AZURE_TABLE_NAME_FOR_CONVERSATION,
   // Local config
   isLocal: process.env.IS_LOCAL === 'true',
+  // Bot display name
+  botDisplayName: process.env.TEAMS_BOT_FULL_DISPLAY_NAME || 'Parikh Public Lens',
 };
 
 export const ragApiPaths = {

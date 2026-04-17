@@ -6,6 +6,7 @@ param azureTableNameForConversation string
 @secure()
 param ragScope string
 param ragEndpoint string
+param ragTenantId string
 
 // Resources
 @maxLength(20)
@@ -24,7 +25,7 @@ param webAppSKU string
 param dockerImageTag string
 param dockerContainerName string
 param dockerRegistryUrl string = '${dockerContainerName}.azurecr.io'  // Use the ACR we create
-param dockerImageName string = '${dockerRegistryUrl}/azure-sdk-qa-bot:${dockerImageTag}'
+param dockerImageName string = '${dockerRegistryUrl}/jaydecoder:${dockerImageTag}'
 
 // Bot
 @maxLength(42)
@@ -42,19 +43,9 @@ resource identity 'Microsoft.ManagedIdentity/userAssignedIdentities@2023-01-31' 
   name: identityName
 }
 
-// Azure Container Registry
-resource acr 'Microsoft.ContainerRegistry/registries@2023-07-01' = {
-  name: resourceBaseName
-  location: location
-  sku: {
-    name: 'Standard'
-  }
-  properties: {
-    adminUserEnabled: false
-    publicNetworkAccess: 'Enabled'
-    networkRuleBypassOptions: 'AzureServices'
-    zoneRedundancy: 'Disabled'
-  }
+// Azure Container Registry (the one used for Docker image pulls)
+resource acr 'Microsoft.ContainerRegistry/registries@2023-07-01' existing = {
+  name: dockerContainerName
 }
 
 // Grant the managed identity AcrPull role on the container registry
@@ -131,6 +122,10 @@ resource webApp 'Microsoft.Web/sites@2021-02-01' = {
           name: 'BOT_TYPE'
           value: 'UserAssignedMsi'
         }
+        {
+          name: 'TEAMS_BOT_FULL_DISPLAY_NAME'
+          value: botDisplayName
+        }
         // RAG
         {
           name: 'RAG_SERVICE_SCOPE'
@@ -139,6 +134,10 @@ resource webApp 'Microsoft.Web/sites@2021-02-01' = {
         {
           name: 'RAG_ENDPOINT'
           value: ragEndpoint
+        }
+        {
+          name: 'RAG_TENANT_ID'
+          value: ragTenantId
         }
         // Azure Storage Account
         {

@@ -51,7 +51,7 @@ export class RAGModel implements PromptCompletionModel {
 
     const currentPrompt = this.promptGenerator.generateCurrentPrompt(context, meta);
     const fullPrompt = await this.generateFullPrompt(currentPrompt, conversationMessages, meta);
-    const completionPayload = this.convertFullPromptToCompletionRequestPayload(fullPrompt, 'azure_sdk_qa_bot');
+    const completionPayload = this.convertFullPromptToCompletionRequestPayload(fullPrompt, config.ragTenantId);
 
     logger.info('prompt to RAG', { prompt: fullPrompt, meta });
     let ragReply = await getRAGReply(completionPayload, ragOptions, meta);

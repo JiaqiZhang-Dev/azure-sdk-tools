@@ -2,7 +2,7 @@ import { CardFactory, MessageFactory, TurnContext } from 'botbuilder';
 import { getTurnContextLogMeta } from '../logging/utils.js';
 import { ConversationHandler, ConversationMessage, Prompt, RAGReply } from '../input/ConversationHandler.js';
 import { createContactCard } from '../cards/components/contact.js';
-import { contactCardVersion } from '../config/config.js';
+import config, { contactCardVersion } from '../config/config.js';
 import { CompletionResponsePayload, isCompletionResponsePayload, RagApiError } from '../backend/rag.js';
 import { logger } from '../logging/logger.js';
 import { setTimeout } from 'node:timers/promises';
@@ -121,7 +121,7 @@ export class ThinkingHandler {
       return answer;
     }
 
-    const footer = `💡 If you have follow-up questions after my response, please @Azure SDK Q&A Bot to continue the conversation.`;
+    const footer = `💡 If you have follow-up questions after my response, please @${config.botDisplayName} to continue the conversation.`;
 
     return `${answer}\n\n---\n\n${footer}`;
   }
