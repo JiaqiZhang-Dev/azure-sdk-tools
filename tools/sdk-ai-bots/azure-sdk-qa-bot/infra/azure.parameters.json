@@ -17,6 +17,9 @@
     "ragTenantId": {
       "value": "${{RAG_TENANT_ID}}"
     },
+    "showReferences": {
+      "value": "${{SHOW_REFERENCES}}"
+    },
     "webAppSKU": {
       "value": "B3"
     },
