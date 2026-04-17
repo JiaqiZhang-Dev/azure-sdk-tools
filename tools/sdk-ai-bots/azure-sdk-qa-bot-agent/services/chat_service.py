@@ -170,11 +170,12 @@ class ChatService:
             )
 
         chat_response = self._postprocess(req, response, agent_conversation_id)
-        asyncio.create_task(
-            self._save_bot_answer_to_conversation(
-                req, response.id, chat_response.answer
+        if not is_prompt_agent:
+            asyncio.create_task(
+                self._save_bot_answer_to_conversation(
+                    req, response.id, chat_response.answer
+                )
             )
-        )
         return chat_response
 
     @staticmethod

@@ -545,6 +545,15 @@ _TENANT_CONFIG_MAP: dict[TenantID, TenantConfig] = {
     ),
     TenantID.DIGITAL_AVATAR_JAY_PARIKH: TenantConfig(
         display_name="Digital Avatar - Jay Parikh",
+        scope=(
+            "Questions about Jay Parikh's publicly discussed views on "
+            "Microsoft CoreAI, Azure AI platform strategy, AI agents, "
+            "Agent Factory, developer tools ecosystem (GitHub, VS Code, "
+            "Copilot, Foundry), engineering culture, ways of working, "
+            "and technology direction. Broader strategy, moat, and "
+            "competitive-positioning questions are in-scope when Jay "
+            "has addressed them publicly."
+        ),
         prompt_agent_name="jay-parikh-agent",
     ),
 }

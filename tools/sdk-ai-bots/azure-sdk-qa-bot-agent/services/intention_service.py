@@ -12,6 +12,7 @@ from pathlib import Path
 from typing import Sequence
 
 from config.app_config import get as cfg
+from config.tenant_config import get_tenant_scope_description
 from models.chat import Message
 from models.conversation import ConversationMessageItem, Role
 from models.intention import IntentionRequest, IntentionResponse
@@ -113,6 +114,22 @@ class IntentionService:
                     exclude_none=True
                 ),
             ]
+
+            # If a tenant is specified, inject its scope so the classifier
+            # knows what counts as in-scope for this conversation.
+            if req.tenant_id is not None:
+                scope_description = get_tenant_scope_description(req.tenant_id)
+                if scope_description:
+                    messages.append(
+                        Message(
+                            role=Role.System,
+                            content=(
+                                "Current tenant context (use this to decide "
+                                "what is in-scope for this conversation):\n\n"
+                                f"{scope_description}"
+                            ),
+                        ).model_dump(exclude_none=True)
+                    )
 
             # Include conversation history when available
             if history:
