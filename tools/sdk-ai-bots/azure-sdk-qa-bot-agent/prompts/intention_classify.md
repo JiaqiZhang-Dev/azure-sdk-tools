@@ -33,6 +33,7 @@ The bot should NOT respond when the message is:
 - A message clearly directed at specific people instead of the bot or the ongoing bot exchange
 - A greeting or thank-you that doesn't need a bot answer
 - Clearly outside the current tenant's scope AND clearly outside any adjacent domain the tenant would plausibly cover
+- A **meta question about the bot itself** — e.g. questions about the bot's implementation, what model it uses, how it should be configured, whether it should disclose "powered by xxx", feature requests for the bot, or feedback about the bot's behavior. These are directed at the development team, not at the bot's persona, and should NOT trigger a response
 
 When prior conversation history is provided:
 
@@ -52,3 +53,4 @@ Example responses:
 {"should_respond": true, "reason": "The message is a follow-up clarification to the bot's previous TypeSpec guidance."}
 {"should_respond": true, "reason": "The question about Agent Factory is inside the current tenant's scope (Jay Parikh digital avatar)."}
 {"should_respond": false, "reason": "The message is a casual thank-you that does not require a bot answer."}
+{"should_respond": false, "reason": "The message is a meta question about the bot's implementation (what LLM it uses), directed at the dev team, not at the bot's persona."}
