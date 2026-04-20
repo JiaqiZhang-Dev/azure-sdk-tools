@@ -20,6 +20,8 @@ const config = {
   isLocal: process.env.IS_LOCAL === 'true',
   // Bot display name
   botDisplayName: process.env.TEAMS_BOT_FULL_DISPLAY_NAME || 'Parikh Public Lens',
+  // Feature flags
+  showReferences: process.env.SHOW_REFERENCES?.toLowerCase() === 'true',
 };
 
 export const ragApiPaths = {

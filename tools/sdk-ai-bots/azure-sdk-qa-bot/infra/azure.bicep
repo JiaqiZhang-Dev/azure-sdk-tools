@@ -7,6 +7,7 @@ param azureTableNameForConversation string
 param ragScope string
 param ragEndpoint string
 param ragTenantId string
+param showReferences string = 'false'
 
 // Resources
 @maxLength(20)
@@ -138,6 +139,10 @@ resource webApp 'Microsoft.Web/sites@2021-02-01' = {
         {
           name: 'RAG_TENANT_ID'
           value: ragTenantId
+        }
+        {
+          name: 'SHOW_REFERENCES'
+          value: showReferences
         }
         // Azure Storage Account
         {

@@ -107,8 +107,8 @@ export class ThinkingHandler {
     }
 
     // received reply successfully
-    const answerWithReferences = this.addReferencesToReply(reply);
-    return { answer: answerWithReferences, isError: false };
+    const answer = config.showReferences ? this.addReferencesToReply(reply) : reply.answer;
+    return { answer, isError: false };
   }
 
   /**
