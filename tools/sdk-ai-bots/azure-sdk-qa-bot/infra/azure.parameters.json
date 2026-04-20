@@ -20,6 +20,9 @@
     "showReferences": {
       "value": "${{SHOW_REFERENCES}}"
     },
+    "modelName": {
+      "value": "${{MODEL_NAME}}"
+    },
     "webAppSKU": {
       "value": "B3"
     },

@@ -80,6 +80,7 @@ export class ThinkingHandler {
       type: 'message',
       id: this.resourceId,
       text: formattedAnswer,
+      textFormat: 'markdown',
       entities: [entity],
       conversation: this.context.activity.conversation,
     } as any;
@@ -123,7 +124,16 @@ export class ThinkingHandler {
 
     const footer = `💡 If you have follow-up questions after my response, please @${config.botDisplayName} to continue the conversation.`;
 
-    return `${answer}\n\n---\n\n${footer}`;
+    const fullAnswer = `${answer}<br/><hr/>${footer}`;
+    return this.adaptNewlinesForTeams(fullAnswer);
+  }
+
+  /**
+   * Teams collapses consecutive newlines even in markdown mode.
+   * Replace double newlines with <br/> tags so paragraph breaks render correctly.
+   */
+  private adaptNewlinesForTeams(text: string): string {
+    return text.replace(/\n\n/g, '<br/><br/>');
   }
 
   private async startCore(resourceId: string) {

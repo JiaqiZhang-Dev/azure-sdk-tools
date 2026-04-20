@@ -8,6 +8,7 @@ param ragScope string
 param ragEndpoint string
 param ragTenantId string
 param showReferences string = 'false'
+param modelName string
 
 // Resources
 @maxLength(20)
@@ -143,6 +144,10 @@ resource webApp 'Microsoft.Web/sites@2021-02-01' = {
         {
           name: 'SHOW_REFERENCES'
           value: showReferences
+        }
+        {
+          name: 'MODEL_NAME'
+          value: modelName
         }
         // Azure Storage Account
         {

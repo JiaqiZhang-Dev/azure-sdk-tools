@@ -6,7 +6,7 @@ export function createContactCard() {
     body: [
       {
         type: 'TextBlock',
-        text: '🤖 This bot is an informal digest of Jay Parikh\'s public statements; it may be incomplete and should not be treated as official guidance.',
+        text: `🤖 This bot is an informal digest of Jay Parikh's public statements, powered by ${config.modelName}; it may be incomplete and should not be treated as official guidance.`,
         wrap: true,
       },
       {

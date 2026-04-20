@@ -22,6 +22,8 @@ const config = {
   botDisplayName: process.env.TEAMS_BOT_FULL_DISPLAY_NAME || 'Parikh Public Lens',
   // Feature flags
   showReferences: process.env.SHOW_REFERENCES?.toLowerCase() === 'true',
+  // Model name shown in the contact card
+  modelName: process.env.MODEL_NAME || 'gpt-5.4',
 };
 
 export const ragApiPaths = {
