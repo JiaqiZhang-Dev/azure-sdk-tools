@@ -1,17 +1,15 @@
 using System.ComponentModel;
 using System.CommandLine;
-using System.Text.RegularExpressions;
 
 using ModelContextProtocol.Server;
-using Octokit;
 
 using Azure.Sdk.Tools.Cli.Commands;
 using Azure.Sdk.Tools.Cli.Helpers;
+using Azure.Sdk.Tools.Cli.Helpers.Codeowners;
 using Azure.Sdk.Tools.Cli.Models;
 using Azure.Sdk.Tools.Cli.Models.Codeowners;
 using Azure.Sdk.Tools.Cli.Models.Responses.Codeowners;
 using Azure.Sdk.Tools.Cli.Services;
-using Azure.Sdk.Tools.CodeownersUtils.Editing;
 using Azure.Sdk.Tools.CodeownersUtils.Parsing;
 using Azure.Sdk.Tools.CodeownersUtils.Utils;
 using Azure.Sdk.Tools.Cli.Configuration;
@@ -33,19 +31,7 @@ namespace Azure.Sdk.Tools.Cli.Tools.Config
         // Core command options
         private readonly Option<string> repoOption = new("--repo", "-r")
         {
-            Description = "The repository name",
-            Required = true,
-        };
-
-        private readonly Option<string> pathOptionOptional = new("--path", "-p")
-        {
-            Description = "The repository path to check/validate",
-            Required = false,
-        };
-
-        private readonly Option<string> serviceLabelOption = new("--service-label")
-        {
-            Description = "The service label",
+            Description = "Repository name of the format <owner>/<repo> (e.g., Azure/azure-sdk-for-python).",
             Required = false,
         };
 
@@ -101,25 +87,14 @@ namespace Azure.Sdk.Tools.Cli.Tools.Config
             Description = "Repository path (e.g., sdk/formrecognizer/)",
             Required = false,
         };
-
-        private readonly Option<string> optionalRepoOption = new("--repo", "-r")
-        {
-            Description = "Repository name of the format <owner>/<repo> (e.g., Azure/azure-sdk-for-python).",
-            Required = false,
-        };
-
-
-
-        private readonly IGitHubService githubService;
         private readonly ILogger<CodeownersTool> logger;
         private readonly ICodeownersValidatorHelper codeownersValidatorHelper;
         private readonly ICodeownersGenerateHelper codeownersGenerateHelper;
         private readonly ICodeownersManagementHelper codeownersManagementHelper;
+        private readonly ICheckPackageHelper checkPackageHelper;
         private readonly IGitHelper gitHelper;
         private readonly IDevOpsService devOpsService;
-
-        // URL constants
-        private const string azureWriteTeamsBlobUrl = "https://azuresdkartifacts.blob.core.windows.net/azure-sdk-write-teams/azure-sdk-write-teams-blob";
+        private readonly ICodeownersAuditHelper codeownersAuditHelper;
 
         // Export section command options
         private readonly Option<string> codeownersPathOption = new("--codeowners-path")
@@ -147,6 +122,50 @@ namespace Azure.Sdk.Tools.Cli.Tools.Config
             Required = false,
         };
 
+        // Check-package command options
+        private readonly Option<string> directoryPathOption = new("--directory-path")
+        {
+            Description = "Relative path to the package directory from the repo root",
+            Required = true,
+        };
+
+        private readonly Option<string> codeownersCacheOption = new("--codeowners-cache")
+        {
+            Description = "Local filesystem path to a rendered CODEOWNERS cache file (overrides --repo-derived URL)",
+            Required = false,
+        };
+
+        private readonly Option<int> invalidOwnerLookbackDaysOption = new("--invalid-owner-lookback-days")
+        {
+            Description = "Number of days after which an owner marked 'Invalid Since' is excluded from CODEOWNERS generation. Owners within this window are still treated as valid.",
+            Required = false,
+            DefaultValueFactory = _ => 90,
+        };
+
+        // Audit command options
+        private readonly Option<bool> fixOption = new("--fix")
+        {
+            Description = "Apply fixes for violations that support automated repair",
+            Required = false,
+            DefaultValueFactory = _ => false,
+        };
+
+        private readonly Option<bool> forceOption = new("--force")
+        {
+            Description = "Override safety thresholds (e.g., allow fixing more than 5 invalid owners)",
+            Required = false,
+            DefaultValueFactory = _ => false,
+        };
+
+        // Add-label-owner command options
+        private readonly Option<bool> forceLabelOwnerPathOption = new("--force")
+        {
+            Description = "Create the CODEOWNERS entry even when the path looks like a package directory. "
+                + "By default a 3-segment path (e.g. sdk/<service>/<package>) is rejected in favor of using the package name.",
+            Required = false,
+            DefaultValueFactory = _ => false,
+        };
+
         // Command names
         private const string generateCodeownersCommandName = "generate";
         private const string viewCodeownersCommandName = "view";
@@ -157,6 +176,9 @@ namespace Azure.Sdk.Tools.Cli.Tools.Config
         private const string removeCodeownersToPackageCommandName = "remove-package-owner";
         private const string removeLabelToPackageCommandName = "remove-package-label";
         private const string removeLabelOwnerCommandName = "remove-label-owner";
+        private const string checkPackageCommandName = "check-package";
+        private const string updateCacheCommandName = "update-cache";
+        private const string auditCommandName = "audit";
 
 
         // MCP Tool Names
@@ -167,25 +189,29 @@ namespace Azure.Sdk.Tools.Cli.Tools.Config
         private const string CodeownerRemovePackageOwnerToolName = "azsdk_engsys_codeowner_remove_package_owner";
         private const string CodeownerRemoveLabelToolName = "azsdk_engsys_codeowner_remove_package_label";
         private const string CodeownerRemoveLabelOwnerToolName = "azsdk_engsys_codeowner_remove_label_owner";
+        private const string CodeownerCheckPackageToolName = "azsdk_engsys_codeowner_check_package";
+        private const string CodeownerUpdateCacheToolName = "azsdk_engsys_codeowner_update_cache";
 
         public CodeownersTool(
-            IGitHubService githubService,
             ILogger<CodeownersTool> logger,
             ILoggerFactory? loggerFactory,
             ICodeownersValidatorHelper codeownersValidator,
             ICodeownersGenerateHelper codeownersGenerateHelper,
             IGitHelper gitHelper,
             ICodeownersManagementHelper codeownersManagementHelper,
-            IDevOpsService devOpsService
+            ICheckPackageHelper checkPackageHelper,
+            IDevOpsService devOpsService,
+            ICodeownersAuditHelper codeownersAuditHelper
         )
         {
-            this.githubService = githubService;
             this.logger = logger;
             this.codeownersValidatorHelper = codeownersValidator;
             this.codeownersGenerateHelper = codeownersGenerateHelper;
             this.codeownersManagementHelper = codeownersManagementHelper;
+            this.checkPackageHelper = checkPackageHelper;
             this.gitHelper = gitHelper;
             this.devOpsService = devOpsService;
+            this.codeownersAuditHelper = codeownersAuditHelper;
 
             CodeownersUtils.Utils.Log.Configure(loggerFactory);
         }
@@ -194,40 +220,49 @@ namespace Azure.Sdk.Tools.Cli.Tools.Config
         [
             new(generateCodeownersCommandName, "Generate CODEOWNERS file from Azure DevOps work items")
             {
-                repoRootOption, packageTypesOption, sectionOption,
+                repoRootOption, packageTypesOption, sectionOption, invalidOwnerLookbackDaysOption,
             },
             new(viewCodeownersCommandName, "View CODEOWNERS associations for a user, label, package, or path")
             {
-                githubUserOption, labelsOption, packageOption, pathOption, optionalRepoOption,
+                githubUserOption, labelsOption, packageOption, pathOption, repoOption,
             },
             new(addCodeownersToPackageCommandName, "Add source owner(s) to a package")
             {
-                multipleGithubUserOption, packageOption, optionalRepoOption,
+                multipleGithubUserOption, packageOption, repoOption,
             },
             new(addLabelToPackageCommandName, "Add PR label(s) to a package")
             {
-                labelsOption, packageOption, optionalRepoOption,
+                labelsOption, packageOption, repoOption,
             },
             new(addLabelOwnerCommandName, "Add owner(s) to a label and optional path")
             {
-                multipleGithubUserOption, labelsOption, pathOption, ownerTypeOption, optionalRepoOption, sectionOption,
+                multipleGithubUserOption, labelsOption, pathOption, ownerTypeOption, repoOption, sectionOption, forceLabelOwnerPathOption,
             },
             new(removeCodeownersToPackageCommandName, "Remove source owner(s) from a package")
             {
-                multipleGithubUserOption, packageOption, optionalRepoOption,
+                multipleGithubUserOption, packageOption, repoOption,
             },
             new(removeLabelToPackageCommandName, "Remove PR label(s) from a package")
             {
-                labelsOption, packageOption, optionalRepoOption,
+                labelsOption, packageOption, repoOption,
             },
             new(removeLabelOwnerCommandName, "Remove owner(s) from a label and optional path")
             {
-                multipleGithubUserOption, labelsOption, pathOption, ownerTypeOption, optionalRepoOption, sectionOption,
+                multipleGithubUserOption, labelsOption, pathOption, ownerTypeOption, repoOption, sectionOption,
             },
             new(exportSectionCommandName, "Export one or more named sections from a CODEOWNERS file")
             {
                 codeownersPathOption, sectionsOption, outputFilePathOption,
-            }
+            },
+            new(checkPackageCommandName, "Check that a package has sufficient owners, PR labels, and service owners from a CODEOWNERS cache file")
+            {
+                directoryPathOption, repoOption, codeownersCacheOption,
+            },
+            new McpCommand(updateCacheCommandName, "Run the CODEOWNERS cache update pipeline", CodeownerUpdateCacheToolName),
+            new(auditCommandName, "Audit CODEOWNERS work items for violations and optionally fix them. You MUST update the CODEOWNERS cache before running this command.")
+            {
+                fixOption, forceOption, repoOption,
+            },
         ];
 
         public override async Task<CommandResponse> HandleCommand(ParseResult parseResult, CancellationToken ct)
@@ -241,7 +276,8 @@ namespace Azure.Sdk.Tools.Cli.Tools.Config
                 );
                 var packageTypes = parseResult.GetValue(packageTypesOption);
                 var section = parseResult.GetValue(sectionOption);
-                var generateResult = await GenerateCodeowners(repoRoot, packageTypes, section, ct);
+                var invalidOwnerLookbackDays = parseResult.GetValue(invalidOwnerLookbackDaysOption);
+                var generateResult = await GenerateCodeowners(repoRoot, packageTypes, section, invalidOwnerLookbackDays, ct);
                 return generateResult;
             }
 
@@ -251,7 +287,7 @@ namespace Azure.Sdk.Tools.Cli.Tools.Config
                 var labels = parseResult.GetValue(labelsOption);
                 var package = parseResult.GetValue(packageOption);
                 var path = parseResult.GetValue(pathOption);
-                var repo = parseResult.GetValue(optionalRepoOption);
+                var repo = parseResult.GetValue(repoOption);
                 return await ViewCodeowners(user, labels, package, path, repo, ct);
             }
 
@@ -259,7 +295,7 @@ namespace Azure.Sdk.Tools.Cli.Tools.Config
             {
                 var users = parseResult.GetValue(multipleGithubUserOption);
                 var package = parseResult.GetValue(packageOption);
-                var repo = parseResult.GetValue(optionalRepoOption);
+                var repo = parseResult.GetValue(repoOption);
                 return await AddPackageOwner(users!, package!, repo, ct);
             }
 
@@ -267,7 +303,7 @@ namespace Azure.Sdk.Tools.Cli.Tools.Config
             {
                 var labels = parseResult.GetValue(labelsOption);
                 var package = parseResult.GetValue(packageOption);
-                var repo = parseResult.GetValue(optionalRepoOption);
+                var repo = parseResult.GetValue(repoOption);
                 return await AddPackageLabel(labels!, package!, repo, ct);
             }
 
@@ -277,16 +313,17 @@ namespace Azure.Sdk.Tools.Cli.Tools.Config
                 var labels = parseResult.GetValue(labelsOption);
                 var ownerType = parseResult.GetValue(ownerTypeOption);
                 var path = parseResult.GetValue(pathOption);
-                var repo = parseResult.GetValue(optionalRepoOption);
+                var repo = parseResult.GetValue(repoOption);
                 var section = parseResult.GetValue(sectionOption);
-                return await AddLabelOwner(users!, labels!, ownerType!, path, repo, section, ct);
+                var force = parseResult.GetValue(forceLabelOwnerPathOption);
+                return await AddLabelOwner(users!, labels!, ownerType!, path, repo, section, force, ct);
             }
 
             if (command == removeCodeownersToPackageCommandName)
             {
                 var users = parseResult.GetValue(multipleGithubUserOption);
                 var package = parseResult.GetValue(packageOption);
-                var repo = parseResult.GetValue(optionalRepoOption);
+                var repo = parseResult.GetValue(repoOption);
                 return await RemovePackageOwner(users!, package!, repo, ct);
             }
 
@@ -294,7 +331,7 @@ namespace Azure.Sdk.Tools.Cli.Tools.Config
             {
                 var labels = parseResult.GetValue(labelsOption);
                 var package = parseResult.GetValue(packageOption);
-                var repo = parseResult.GetValue(optionalRepoOption);
+                var repo = parseResult.GetValue(repoOption);
                 return await RemovePackageLabel(labels!, package!, repo, ct);
             }
 
@@ -304,7 +341,7 @@ namespace Azure.Sdk.Tools.Cli.Tools.Config
                 var labels = parseResult.GetValue(labelsOption);
                 var ownerType = parseResult.GetValue(ownerTypeOption);
                 var path = parseResult.GetValue(pathOption);
-                var repo = parseResult.GetValue(optionalRepoOption);
+                var repo = parseResult.GetValue(repoOption);
                 var section = parseResult.GetValue(sectionOption);
                 return await RemoveLabelOwner(users!, labels!, ownerType!, path, repo, section, ct);
             }
@@ -317,6 +354,27 @@ namespace Azure.Sdk.Tools.Cli.Tools.Config
                 return await ExportSection(codeownersPath!, sections!, output!, ct);
             }
 
+            if (command == checkPackageCommandName)
+            {
+                var directoryPath = parseResult.GetValue(directoryPathOption);
+                var cachePath = parseResult.GetValue(codeownersCacheOption);
+                var repo = parseResult.GetValue(repoOption);
+                return await CheckPackage(directoryPath!, cachePath, repo, ct);
+            }
+
+            if (command == updateCacheCommandName)
+            {
+                return await UpdateCache(ct);
+            }
+
+            if (command == auditCommandName)
+            {
+                var fix = parseResult.GetValue(fixOption);
+                var force = parseResult.GetValue(forceOption);
+                var repo = parseResult.GetValue(repoOption);
+                return await Audit(fix, force, repo, ct);
+            }
+
             return new DefaultCommandResponse { ResponseError = $"Unknown command: '{command}'" };
         }
 
@@ -327,6 +385,7 @@ namespace Azure.Sdk.Tools.Cli.Tools.Config
             string repoRoot,
             string[] packageTypes,
             string section,
+            int invalidOwnerLookbackDays,
             CancellationToken ct)
         {
             try
@@ -358,7 +417,7 @@ namespace Azure.Sdk.Tools.Cli.Tools.Config
                     };
                 }
 
-                await codeownersGenerateHelper.GenerateCodeowners(repoRoot, repo, packageTypes, section, ct);
+                await codeownersGenerateHelper.GenerateCodeowners(repoRoot, repo, packageTypes, section, invalidOwnerLookbackDays, ct);
 
                 return new DefaultCommandResponse
                 {
@@ -461,6 +520,75 @@ namespace Azure.Sdk.Tools.Cli.Tools.Config
             };
         }
 
+        private const string CacheBaseUrl = "https://azuresdkartifacts.blob.core.windows.net/azure-sdk-write-teams/cache";
+
+        /// <summary>
+        /// Validates that a package has sufficient owners, PR labels, and service owners
+        /// by reading from a CODEOWNERS cache. Uses --codeowners-cache if specified,
+        /// otherwise builds a blob URL from --repo (explicit or inferred from git remote).
+        /// </summary>
+        [McpServerTool(Name = CodeownerCheckPackageToolName), Description("Check that a package has sufficient owners, PR labels, and service owners from a CODEOWNERS cache file.")]
+        public async Task<CommandResponse> CheckPackage(
+            string directoryPath,
+            string? codeownersCachePath = null,
+            string? repo = null,
+            CancellationToken ct = default)
+        {
+            var packageName = CheckPackageHelper.ResolvePackageName(directoryPath);
+
+            try
+            {
+                string? resolvedRepo = repo;
+                string cacheSource;
+                if (!string.IsNullOrEmpty(codeownersCachePath))
+                {
+                    if (!File.Exists(codeownersCachePath))
+                    {
+                        return CreateCheckPackageFailureResponse(
+                            directoryPath,
+                            packageName,
+                            resolvedRepo,
+                            CheckPackageIssue.Codes.InvalidCacheSource,
+                            $"CODEOWNERS cache path must be an existing file: {codeownersCachePath}",
+                            "Run check-package again with a valid --codeowners-cache file path, or omit --codeowners-cache to use the repo cache.");
+                    }
+
+                    cacheSource = codeownersCachePath;
+                }
+                else
+                {
+                    resolvedRepo = await ResolveRepo(repo, ct);
+                    // repo is "Azure/azure-sdk-for-net" → split to build URL
+                    var parts = resolvedRepo.Split('/');
+                    if (parts.Length != 2)
+                    {
+                        return CreateCheckPackageFailureResponse(
+                            directoryPath,
+                            packageName,
+                            resolvedRepo,
+                            CheckPackageIssue.Codes.InvalidRepo,
+                            $"Invalid repo format '{resolvedRepo}'. Expected '<owner>/<repo>'.",
+                            "Run check-package again with a repo of the form 'Azure/<repo>', or omit --repo to let azsdk infer it.");
+                    }
+                    cacheSource = $"{CacheBaseUrl}/{parts[0].ToLowerInvariant()}/{parts[1]}/CODEOWNERS.cache";
+                }
+
+                var entries = CodeownersParser.ParseCodeownersFile(cacheSource);
+                return checkPackageHelper.CheckPackage(directoryPath, resolvedRepo, entries);
+            }
+            catch (Exception ex)
+            {
+                logger.LogDebug(ex, "check-package failed unexpectedly");
+                return CreateCheckPackageFailureResponse(
+                    directoryPath,
+                    packageName,
+                    repo,
+                    CheckPackageIssue.Codes.UnexpectedError,
+                    ex.Message,
+                    "Retry the command. If the failure persists, use the support channel returned in this response.");
+            }
+        }
+
         [McpServerTool(Name = CodeownerAddPackageOwnerToolName), Description("Add source owner(s) to a package in CODEOWNERS work items.")]
         public async Task<CommandResponse> AddPackageOwner(
             string[] githubUsers,
@@ -510,7 +638,7 @@ namespace Azure.Sdk.Tools.Cli.Tools.Config
             }
         }
 
-        [McpServerTool(Name = CodeownerAddLabelOwnerToolName), Description("Add owner(s) to a label with an optional path in CODEOWNERS work items. Valid ownerType values: service-owner, azsdk-owner, pr-label.")]
+        [McpServerTool(Name = CodeownerAddLabelOwnerToolName), Description("Add owner(s) to a label with an optional path in CODEOWNERS work items. Valid ownerType values: service-owner, azsdk-owner, pr-label. A 3-segment path (e.g. sdk/<service>/<package>) is rejected because it targets a package directory; add owners to the package by name instead, or set force=true to create the path anyway.")]
         public async Task<CommandResponse> AddLabelOwner(
             string[] githubUsers,
             string[] labels,
@@ -518,6 +646,7 @@ namespace Azure.Sdk.Tools.Cli.Tools.Config
             string? path = null,
             string? repo = null,
             string section = "Client Libraries",
+            bool force = false,
             CancellationToken ct = default
         )
         {
@@ -526,6 +655,13 @@ namespace Azure.Sdk.Tools.Cli.Tools.Config
                 if (string.IsNullOrEmpty(section))
                 {
                     throw new ArgumentException("Section name must be provided", nameof(section));
+                }
+                if (!force && LooksLikePackageDirectory(path, out var packageName))
+                {
+                    throw new ArgumentException(
+                        $"The path '{path}' looks like a package directory. Use the package name '{packageName}' instead of a full path, "
+                        + "or pass --force to create a CODEOWNERS entry for this path anyway.",
+                        nameof(path));
                 }
                 repo = await ResolveRepo(repo, ct);
                 return await codeownersManagementHelper.AddOwnersAndLabelsToPath(
@@ -543,6 +679,34 @@ namespace Azure.Sdk.Tools.Cli.Tools.Config
                 logger.LogError(ex, "Error adding label owner(s)");
                 return new DefaultCommandResponse { ResponseError = ex.Message };
             }
+        }
+
+        /// <summary>
+        /// Returns true when a CODEOWNERS path targets a specific package directory
+        /// (exactly three segments, e.g. sdk/<service>/<package>), as opposed to a
+        /// service-level path. Such entries should be attached to the package by name rather
+        /// than a raw path. The final path segment is returned as the suggested package name.
+        /// Paths containing a wildcard ('*') are never treated as package directories.
+        /// </summary>
+        public static bool LooksLikePackageDirectory(string? path, out string packageName)
+        {
+            packageName = string.Empty;
+            if (string.IsNullOrWhiteSpace(path) || path.Contains('*'))
+            {
+                return false;
+            }
+
+            var segments = path
+                .Replace('\\', '/')
+                .Split('/', StringSplitOptions.RemoveEmptyEntries | StringSplitOptions.TrimEntries);
+
+            if (segments.Length != 3)
+            {
+                return false;
+            }
+
+            packageName = segments[^1];
+            return true;
         }
 
         [McpServerTool(Name = CodeownerRemovePackageOwnerToolName), Description("Remove source owner(s) from a package in CODEOWNERS work items.")]
@@ -630,6 +794,58 @@ namespace Azure.Sdk.Tools.Cli.Tools.Config
             }
         }
 
+        private const int UpdateCachePipelineDefinitionId = 5112;
+
+        [McpServerTool(Name = CodeownerUpdateCacheToolName), Description("Run the CODEOWNERS cache update pipeline. Use this after making changes to ownership information to unblock releases or other pipelines.")]
+        public async Task<DefaultCommandResponse> UpdateCache(CancellationToken ct = default)
+        {
+            try
+            {
+                var build = await devOpsService.RunPipelineAsync(UpdateCachePipelineDefinitionId, new Dictionary<string, string>(), ct: ct);
+                var pipelineUrl = DevOpsService.GetPipelineUrl(build.Id);
+                logger.LogInformation("Started CODEOWNERS cache update pipeline: {pipelineUrl}", pipelineUrl);
+                return new DefaultCommandResponse
+                {
+                    Message = $"CODEOWNERS cache update pipeline started successfully. Build id: {build.Id}. Pipeline run: {pipelineUrl}"
+                };
+            }
+            catch (Exception ex)
+            {
+                logger.LogError(ex, "Failed to start CODEOWNERS cache update pipeline");
+                return new DefaultCommandResponse
+                {
+                    ResponseError = $"Failed to start CODEOWNERS cache update pipeline: {ex.Message}"
+                };
+            }
+        }
+
+        /// <summary>
+        /// Audits CODEOWNERS work items for violations.
+        /// The CODEOWNERS cache MUST be updated before running audit.
+        /// When --fix is set, applies automated fixes for rules that support them.
+        /// When --force is set, overrides safety thresholds.
+        /// When --repo is set, scopes Packages (by language) and Label Owners (by Custom.Repository)
+        /// to the specified repo, but all Owners and Labels are always in scope.
+        /// </summary>
+        public async Task<CommandResponse> Audit(bool fix, bool force, string? repo, CancellationToken ct)
+        {
+            try
+            {
+                if (!string.IsNullOrEmpty(repo) && !repo.StartsWith("Azure/", StringComparison.OrdinalIgnoreCase))
+                {
+                    throw new ArgumentException($"Invalid repo format: '{repo}'. Must be of the form 'Azure/<repo>' (e.g., Azure/azure-sdk-for-net).", nameof(repo));
+                }
+
+                return await codeownersAuditHelper.RunAudit(fix, force, repo, ct);
+
+            } 
+            catch (Exception ex)
+            {
+                logger.LogError(ex, "Audit failed");
+                return new DefaultCommandResponse { ResponseError = $"Audit failed: {ex.Message}" };
+            }
+        }
+
         private async Task<string> ResolveRepo(string? repo, CancellationToken ct)
         {
             if (string.IsNullOrEmpty(repo))
@@ -644,6 +860,32 @@ namespace Azure.Sdk.Tools.Cli.Tools.Config
                 }
             }
             return repo;
+        }
+
+        private static CheckPackageResponse CreateCheckPackageFailureResponse(
+            string directoryPath,
+            string packageName,
+            string? repo,
+            string issueCode,
+            string message,
+            string nextStep)
+        {
+            var response = new CheckPackageResponse
+            {
+                DirectoryPath = directoryPath,
+                PackageName = packageName,
+                Repo = repo,
+                ResponseError = message,
+            };
+
+            response.Issues.Add(new CheckPackageIssue
+            {
+                Code = issueCode,
+                Message = message,
+                NextStep = nextStep,
+            });
+
+            return response;
         }
 
         private async Task<OwnerWorkItem[]> GetOwnerWorkItems(string[] ownerAliases, CancellationToken ct)

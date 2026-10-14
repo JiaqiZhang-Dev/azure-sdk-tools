@@ -3,7 +3,9 @@ using System.Net;
 using System.Net.Http.Headers;
 using System.Text.Json;
 using System.Text.Json.Serialization;
-using Azure.Sdk.Tools.Cli.Models.AzureSdkKnowledgeAICompletion;
+using Azure.Core;
+using Azure.Identity;
+using Azure.Sdk.Tools.Cli.Models.AzureSdkKnowledge;
 using Azure.Sdk.Tools.Cli.Options;
 using Microsoft.Extensions.Options;
 using Microsoft.Identity.Client;
@@ -16,6 +18,7 @@ namespace Azure.Sdk.Tools.Cli.Services
     public class AzureSdkKnowledgeBaseService : IAzureSdkKnowledgeBaseService
     {
         private IPublicClientApplication? _msalApp;
+        private TokenCredential? _tokenCredential;
 
         private readonly HttpClient _httpClient;
         private readonly ILogger<AzureSdkKnowledgeBaseService> _logger;
@@ -29,9 +32,9 @@ namespace Azure.Sdk.Tools.Cli.Services
 
         private static readonly ServiceInfo DefaultAzureSdkKnowledgeService = new()
         {
-            Endpoint = "https://azuresdkqabot-dev-serve-authoring-epgbcvbpa3adcvcu.westus2-01.azurewebsites.net",
-            ClientId = "830f1656-8b36-4e8e-9781-87ccdd038644",
-            AuthScope = "api://azure-sdk-qa-bot-dev/token"
+            Endpoint = "https://azuresdkqabot-server-c8czabhzhweadwgu.westus2-01.azurewebsites.net",
+            ClientId = "899da762-d510-48f2-911a-db9ea0cc41fd",
+            AuthScope = "api://azure-sdk-qa-bot/token"
         };
 
         public AzureSdkKnowledgeBaseService(
@@ -63,6 +66,25 @@ namespace Azure.Sdk.Tools.Cli.Services
                 _options.Endpoint = DefaultAzureSdkKnowledgeService.Endpoint;
                 _options.AuthScope = DefaultAzureSdkKnowledgeService.AuthScope;
                 _options.ClientId = DefaultAzureSdkKnowledgeService.ClientId;
+            }
+            // Detect Azure DevOps pipeline environment via SYSTEM_ACCESSTOKEN.
+            // When running in a pipeline, use AzurePipelinesCredential directly.
+            var systemAccessToken = Environment.GetEnvironmentVariable("SYSTEM_ACCESSTOKEN");
+            if (!string.IsNullOrEmpty(systemAccessToken))
+            {
+                var pipelinesClientID = Environment.GetEnvironmentVariable("AZURESUBSCRIPTION_CLIENT_ID");
+                var pipelinesTenantID = Environment.GetEnvironmentVariable("AZURESUBSCRIPTION_TENANT_ID");
+                var serviceConnectionID = Environment.GetEnvironmentVariable("AZURESUBSCRIPTION_SERVICE_CONNECTION_ID");
+                if (!string.IsNullOrEmpty(pipelinesClientID) && !string.IsNullOrEmpty(pipelinesTenantID) && !string.IsNullOrEmpty(serviceConnectionID))
+                {
+                    _logger.LogInformation("Detected Azure DevOps pipeline environment with service connection. Initializing AzurePipelinesCredential for authentication.");
+                    _tokenCredential = new AzurePipelinesCredential(pipelinesTenantID, pipelinesClientID, serviceConnectionID, systemAccessToken, null);
+                }
+            }
+
+            if (_tokenCredential == null)
+            {
+                _tokenCredential = new AzureCliCredential();
             }
 
             if (!string.IsNullOrEmpty(_options.ClientId))
@@ -111,6 +133,76 @@ namespace Azure.Sdk.Tools.Cli.Services
             }
         }
 
+        public async Task<KnowledgeRetrieveResponse> SendKnowledgeRetrieveRequestAsync(
+           KnowledgeRetrieveRequest request,
+           CancellationToken cancellationToken = default)
+        {
+            ArgumentNullException.ThrowIfNull(request);
+
+            if (!ValidateRequest(request))
+            {
+                throw new ArgumentException("Request validation failed", nameof(request));
+            }
+
+            await Initialize(cancellationToken);
+
+            try
+            {
+                var requestUri = new Uri(new Uri(_options.Endpoint), "/knowledge/retrieve");
+
+                using var httpRequest = new HttpRequestMessage(HttpMethod.Post, requestUri);
+
+                var token = await RetrieveAiCompletionAccessTokenAsync(cancellationToken);
+                if (!string.IsNullOrEmpty(token))
+                {
+                    httpRequest.Headers.Authorization = new AuthenticationHeaderValue("Bearer", token);
+                }
+
+                httpRequest.Content = JsonContent.Create(request, options: _jsonOptions);
+                if (_options.EnableDebugLogging)
+                {
+                    var requestJson = JsonSerializer.Serialize(request, _jsonOptions);
+                    _logger.LogDebug("Sending AI completion request to {Endpoint}: {Request}",
+                        requestUri, requestJson);
+                }
+                else
+                {
+                    _logger.LogInformation("Sending AI completion request to {Endpoint} with question length: {Length}",
+                        requestUri, request.Query.Length);
+                }
+
+                var response = await _httpClient.SendAsync(httpRequest, cancellationToken)
+                    .ConfigureAwait(false);
+
+                return await HandleKnowledgeRetrieveHttpResponse(response, cancellationToken).ConfigureAwait(false);
+            }
+            catch (OperationCanceledException) when (cancellationToken.IsCancellationRequested)
+            {
+                _logger.LogWarning("AI completion request was cancelled");
+                throw;
+            }
+            catch (HttpRequestException ex)
+            {
+                _logger.LogError(ex, "HTTP error calling AI completion endpoint");
+                throw new InvalidOperationException($"Failed to call AI completion endpoint: {ex.Message}", ex);
+            }
+            catch (TaskCanceledException ex) when (!cancellationToken.IsCancellationRequested)
+            {
+                _logger.LogError(ex, "Request to AI completion endpoint timed out");
+                throw new InvalidOperationException("Request to AI completion endpoint timed out", ex);
+            }
+            catch (JsonException ex)
+            {
+                _logger.LogError(ex, "Failed to deserialize AI completion response");
+                throw new InvalidOperationException($"Invalid response format from AI completion endpoint: {ex.Message}", ex);
+            }
+            catch (Exception ex)
+            {
+                _logger.LogError(ex, "Unexpected error calling AI completion endpoint");
+                throw new InvalidOperationException($"Unexpected error calling AI completion endpoint: {ex.Message}", ex);
+            }
+        }
+
         public async Task<CompletionResponse> SendCompletionRequestAsync(
             CompletionRequest request,
             CancellationToken cancellationToken = default)
@@ -130,10 +222,10 @@ namespace Azure.Sdk.Tools.Cli.Services
 
                 using var httpRequest = new HttpRequestMessage(HttpMethod.Post, requestUri);
 
-                var authResult = await RetrieveAiCompletionAccessTokenAsync(cancellationToken);
-                if (authResult != null && !string.IsNullOrEmpty(authResult.AccessToken))
+                var token = await RetrieveAiCompletionAccessTokenAsync(cancellationToken);
+                if (!string.IsNullOrEmpty(token))
                 {
-                    httpRequest.Headers.Authorization = new AuthenticationHeaderValue("Bearer", authResult.AccessToken);
+                    httpRequest.Headers.Authorization = new AuthenticationHeaderValue("Bearer", token);
                 }
 
                 httpRequest.Content = JsonContent.Create(request, options: _jsonOptions);
@@ -180,13 +272,72 @@ namespace Azure.Sdk.Tools.Cli.Services
                 throw new InvalidOperationException($"Unexpected error calling AI completion endpoint: {ex.Message}", ex);
             }
         }
+        private async Task<KnowledgeRetrieveResponse> HandleKnowledgeRetrieveHttpResponse(
+            HttpResponseMessage response,
+            CancellationToken cancellationToken)
+        {
+            if (response.IsSuccessStatusCode)
+            {
+                var responseContent = await response.Content.ReadFromJsonAsync<KnowledgeRetrieveResponse>(
+                    _jsonOptions, cancellationToken).ConfigureAwait(false);
 
+                if (responseContent == null)
+                {
+                    throw new InvalidOperationException("Received null response from AI endpoint");
+                }
+
+                if (_options.EnableDebugLogging)
+                {
+                    _logger.LogDebug("Received AI search response, HasResult: {HasResult}, knowledge count: {Count}",
+                        responseContent.HasResult, responseContent.Knowledges != null ? responseContent.Knowledges.Count : 0);
+                }
+                else
+                {
+                    _logger.LogInformation("Received AI search response, HasResult: {HasResult}, knowledge count: {Count}",
+                        responseContent.HasResult, responseContent.Knowledges != null ? responseContent.Knowledges.Count : 0);
+                }
+
+                return responseContent;
+            }
+
+            // Handle error responses
+            await HandleErrorResponse(response, cancellationToken).ConfigureAwait(false);
+
+            // This should never be reached due to exception throwing above
+            throw new InvalidOperationException($"Unexpected response status: {response.StatusCode}");
+        }
         /// <summary>
         /// Validates a completion request to ensure it meets API requirements.
         /// </summary>
         /// <param name="request">The request to validate</param>
         /// <returns>True if valid, false otherwise</returns>
         private bool ValidateRequest(CompletionRequest request)
+        {
+            return ValidateRequestCore(request, r =>
+            {
+                if (string.IsNullOrWhiteSpace(r.Message.Content))
+                {
+                    _logger.LogWarning("Request validation failed: Message content cannot be empty");
+                    return false;
+                }
+                return true;
+            });
+        }
+
+        private bool ValidateRequest(KnowledgeRetrieveRequest request)
+        {
+            return ValidateRequestCore(request, r =>
+            {
+                if (string.IsNullOrWhiteSpace(r.Query))
+                {
+                    _logger.LogWarning("Request validation failed: Query cannot be empty or whitespace");
+                    return false;
+                }
+                return true;
+            });
+        }
+
+        private bool ValidateRequestCore<T>(T request, Func<T, bool>? additionalValidation = null) where T : class
         {
             if (request == null)
             {
@@ -207,17 +358,31 @@ namespace Azure.Sdk.Tools.Cli.Services
             }
 
             // Additional business logic validation
-            if (string.IsNullOrWhiteSpace(request.Message.Content))
+            if (additionalValidation != null && !additionalValidation(request))
             {
-                _logger.LogWarning("Request validation failed: Message content cannot be empty");
                 return false;
             }
 
             return isValid;
         }
 
-        private async Task<AuthenticationResult> RetrieveAiCompletionAccessTokenAsync(CancellationToken cancellationToken = default)
+        private async Task<string> RetrieveAiCompletionAccessTokenAsync(CancellationToken cancellationToken = default)
         {
+            if (_tokenCredential != null)
+            {
+                _logger.LogInformation("Using Azure credential for authentication");
+                try
+                {
+                    var tokenRequestContext = new TokenRequestContext([$"{_options.ClientId}/.default"]);
+                    var token = await _tokenCredential.GetTokenAsync(tokenRequestContext, cancellationToken).ConfigureAwait(false);
+                    return token.Token;
+                }
+                catch (Exception ex)
+                {
+                    _logger.LogError(ex, "Failed to acquire token using credential: {Message}", ex.Message);
+                }
+            }
+
             if (_msalApp != null)
             {
                 if (scopes.Count == 0)
@@ -266,7 +431,7 @@ namespace Azure.Sdk.Tools.Cli.Services
                     _logger.LogError("Failed to authenticate.");
                     throw new Exception("Failed to acquire authentication token after interactive authentication attempt.");
                 }
-                return authResult;
+                return authResult.AccessToken;
             }
             else
             {

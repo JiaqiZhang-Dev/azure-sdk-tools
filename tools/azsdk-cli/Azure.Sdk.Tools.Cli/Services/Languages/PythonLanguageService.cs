@@ -165,16 +165,91 @@ public sealed partial class PythonLanguageService : LanguageService
 
     public override async Task<TestRunResponse> RunAllTests(string packagePath, TestMode testMode = TestMode.Playback, IDictionary<string, string>? liveTestEnvironment = null, TimeSpan? timeout = null, CancellationToken ct = default)
     {
+        var envVars = new Dictionary<string, string>(StringComparer.OrdinalIgnoreCase);
+
+        if (liveTestEnvironment != null)
+        {
+            foreach (var (key, value) in liveTestEnvironment)
+            {
+                envVars[key] = value;
+            }
+        }
+
+        // Set mode env vars after merging liveTestEnvironment so user .env files
+        // cannot accidentally override the requested test mode
+        envVars["AZURE_TEST_RUN_LIVE"] = (testMode == TestMode.Record || testMode == TestMode.Live) ? "true" : "false";
+        envVars["AZURE_SKIP_LIVE_RECORDING"] = (testMode != TestMode.Record) ? "true" : "false";
+
+        // Use caller-provided timeout if specified, otherwise use mode-based defaults
+        timeout ??= testMode == TestMode.Playback
+            ? ProcessOptions.DEFAULT_PROCESS_TIMEOUT
+            : TimeSpan.FromMinutes(10);
+
         var result = await pythonHelper.Run(new PythonOptions(
                 "pytest",
                 ["tests"],
                 workingDirectory: packagePath,
-                timeout: timeout
+                timeout: timeout,
+                environmentVariables: envVars
             ),
             ct
         );
 
-        return new TestRunResponse(result);
+        var response = new TestRunResponse(result);
+
+        // After successful record mode, push test assets to the assets repo
+        if (testMode == TestMode.Record && result.ExitCode == 0)
+        {
+            await PushTestAssets(packagePath, response, ct);
+        }
+
+        return response;
+    }
+
+    protected override async Task PushTestAssets(string packagePath, TestRunResponse response, CancellationToken ct)
+    {
+        var assetsJsonPath = Path.Combine(packagePath, "assets.json");
+        if (!File.Exists(assetsJsonPath))
+        {
+            logger.LogInformation("No assets.json found in {packagePath}, skipping asset push", packagePath);
+            return;
+        }
+
+        logger.LogInformation("Pushing recorded test assets for {packagePath}", packagePath);
+
+        try
+        {
+            // Python SDK uses scripts/manage_recordings.py to push test assets
+            // See: https://github.com/Azure/azure-sdk-for-python/blob/main/doc/dev/tests.md#update-test-recordings
+            var repoRoot = await gitHelper.DiscoverRepoRootAsync(packagePath, ct);
+            var relativeAssetsPath = Path.GetRelativePath(repoRoot, assetsJsonPath);
+            var scriptPath = Path.Combine("scripts", "manage_recordings.py");
+
+            var pushResult = await pythonHelper.Run(new PythonOptions(
+                    "python",
+                    [scriptPath, "push", "-p", relativeAssetsPath],
+                    workingDirectory: repoRoot
+                ),
+                ct
+            );
+
+            if (pushResult.ExitCode == 0)
+            {
+                logger.LogInformation("Successfully pushed test assets");
+            }
+            else
+            {
+                logger.LogWarning("Asset push failed with exit code {exitCode}: {output}", pushResult.ExitCode, pushResult.Output);
+                response.NextSteps ??= [];
+                response.NextSteps.Add($"Asset push failed (exit code {pushResult.ExitCode}). You may need to push assets manually using 'python scripts/manage_recordings.py push -p {relativeAssetsPath}'");
+            }
+        }
+        catch (Exception ex)
+        {
+            logger.LogWarning(ex, "Failed to push test assets");
+            response.NextSteps ??= [];
+            response.NextSteps.Add("Could not push test assets automatically. Try running 'python scripts/manage_recordings.py push -p <path-to-assets.json>' manually from the repo root");
+        }
     }
 
     public override async Task<(bool Success, string? ErrorMessage, PackageInfo? PackageInfo, string? ArtifactPath)> PackAsync(
@@ -258,7 +333,7 @@ public sealed partial class PythonLanguageService : LanguageService
     /// Runs pylint and mypy as the "build" step for Python packages (Python has no compiler).
     /// </summary>
     public override async Task<(bool Success, string? ErrorMessage, PackageInfo? PackageInfo)> BuildAsync(
-        string packagePath, int timeoutMinutes = 30, CancellationToken ct = default)
+        string packagePath, string? additionalArguments = null, int timeoutMinutes = 30, CancellationToken ct = default)
     {
         var packageInfo = await GetPackageInfo(packagePath, ct);
         var check = await LintCode(packagePath, cancellationToken: ct);
@@ -267,11 +342,20 @@ public sealed partial class PythonLanguageService : LanguageService
             : (false, check.CheckStatusDetails, packageInfo);
     }
 
-    public override async Task<List<AppliedPatch>> ApplyPatchesAsync(
+    public override Task<List<AppliedPatch>> ApplyPatchesAsync(
         string customizationRoot,
         string packagePath,
         string buildContext,
         CancellationToken ct)
+        => ApplyPatchesAsync(customizationRoot, packagePath, buildContext, ct, 1, null);
+
+    public override async Task<List<AppliedPatch>> ApplyPatchesAsync(
+        string customizationRoot,
+        string packagePath,
+        string buildContext,
+        CancellationToken ct,
+        int maxAttempts,
+        Func<IReadOnlyList<AppliedPatch>, Task<CopilotAgentValidationResult>>? validateResult)
     {
         try
         {
@@ -294,7 +378,8 @@ public sealed partial class PythonLanguageService : LanguageService
             var agent = new CopilotAgent<string>
             {
                 Instructions = prompt,
-                MaxIterations = 25,
+                MaxIterations = 25 + maxAttempts - 1,
+                ValidateResult = validateResult == null ? null : _ => validateResult(patchLog.ToList()),
                 Tools =
                 [
                     FileTools.CreateGrepSearchTool(packagePath,
@@ -323,6 +408,7 @@ public sealed partial class PythonLanguageService : LanguageService
             logger.LogInformation("Patch application completed, patches applied: {PatchCount}", appliedPatches.Count);
             return appliedPatches;
         }
+        catch (OperationCanceledException) { throw; }
         catch (Exception ex)
         {
             logger.LogError(ex, "Failed to apply patches");

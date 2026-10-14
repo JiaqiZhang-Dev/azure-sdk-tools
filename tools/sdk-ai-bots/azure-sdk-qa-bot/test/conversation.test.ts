@@ -56,7 +56,7 @@ const testMessage: ConversationMessage = {
 // Mock Azure Table Storage client and related classes
 vi.mock('@azure/data-tables', () => {
   return {
-    TableClient: vi.fn().mockImplementation(() => {
+    TableClient: vi.fn().mockImplementation(function () {
       return {
         createEntity: vi.fn().mockResolvedValue({
           partitionKey: 'test-conversation',
@@ -100,7 +100,7 @@ vi.mock('@azure/data-tables', () => {
         }),
       };
     }),
-    TableServiceClient: vi.fn().mockImplementation(() => {
+    TableServiceClient: vi.fn().mockImplementation(function () {
       return {
         createTable: vi.fn().mockResolvedValue({}),
       };
@@ -114,8 +114,8 @@ vi.mock('@azure/data-tables', () => {
 // Mock Azure Identity
 vi.mock('@azure/identity', () => {
   return {
-    DefaultAzureCredential: vi.fn().mockImplementation(() => ({})),
-    ManagedIdentityCredential: vi.fn().mockImplementation(() => ({})),
+    DefaultAzureCredential: vi.fn().mockImplementation(function () { return {}; }),
+    ManagedIdentityCredential: vi.fn().mockImplementation(function () { return {}; }),
   };
 });
 

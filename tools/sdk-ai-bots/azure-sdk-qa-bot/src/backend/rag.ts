@@ -78,6 +78,7 @@ export interface CompletionResponsePayload {
   Category?: string;
   ReasoningProgress?: string;
   route_tenant?: string;
+  trace_id?: string;
 }
 
 export function isCompletionResponsePayload(
@@ -135,7 +136,7 @@ export async function getRAGReply(
   );
   try {
     logger.info('Completion payload:', { payload });
-    let headers = {
+    const headers: Record<string, string> = {
         'Content-Type': 'application/json; charset=utf-8',
     };
     if (options.accessToken) {

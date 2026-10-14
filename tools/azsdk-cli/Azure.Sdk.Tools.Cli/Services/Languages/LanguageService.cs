@@ -1,8 +1,11 @@
 // Copyright (c) Microsoft Corporation.
 // Licensed under the MIT License.
+using System.Text.Json;
+using Azure.Sdk.Tools.Cli.CopilotAgents;
 using Azure.Sdk.Tools.Cli.Helpers;
 using Azure.Sdk.Tools.Cli.Models;
 using Azure.Sdk.Tools.Cli.Models.Responses.Package;
+using Azure.Sdk.Tools.Cli.Models.SdkBreakingChangeDetection;
 using Azure.Sdk.Tools.Cli.Services.Languages.Samples;
 
 namespace Azure.Sdk.Tools.Cli.Services.Languages
@@ -55,6 +58,9 @@ namespace Azure.Sdk.Tools.Cli.Services.Languages
 
         public abstract SdkLanguage Language { get; }
         public virtual bool IsCustomizedCodeUpdateSupported => false;
+
+        /// <summary>Whether classification requires a catalog to produce language-specific mitigation guidance.</summary>
+        public virtual bool RequiresBreakingChangePatternCatalog => false;
 
 #pragma warning disable CS1998
         public async virtual Task<PackageInfo> GetPackageInfo(string packagePath, CancellationToken cancellationToken = default)
@@ -307,6 +313,54 @@ namespace Azure.Sdk.Tools.Cli.Services.Languages
         }
 
         /// <summary>
+        /// Pushes recorded test assets to the assets repository using test-proxy.
+        /// Called after a successful record-mode test run when assets.json exists.
+        /// Language services that use a different push mechanism should override this method.
+        /// </summary>
+        /// <param name="packagePath">Path to the package directory containing assets.json.</param>
+        /// <param name="response">The test run response to append next steps to on failure.</param>
+        /// <param name="ct">Cancellation token.</param>
+        protected virtual async Task PushTestAssets(string packagePath, TestRunResponse response, CancellationToken ct)
+        {
+            var assetsJsonPath = Path.Combine(packagePath, "assets.json");
+            if (!File.Exists(assetsJsonPath))
+            {
+                logger.LogInformation("No assets.json found in {packagePath}, skipping asset push", packagePath);
+                return;
+            }
+
+            logger.LogInformation("Pushing recorded test assets for {packagePath}", packagePath);
+
+            try
+            {
+                var pushResult = await processHelper.Run(new ProcessOptions(
+                        command: "test-proxy",
+                        args: ["push", "-a", "assets.json"],
+                        workingDirectory: packagePath
+                    ),
+                    ct
+                );
+
+                if (pushResult.ExitCode == 0)
+                {
+                    logger.LogInformation("Successfully pushed test assets");
+                }
+                else
+                {
+                    logger.LogWarning("Asset push failed with exit code {exitCode}: {output}", pushResult.ExitCode, pushResult.Output);
+                    response.NextSteps ??= [];
+                    response.NextSteps.Add($"Asset push failed (exit code {pushResult.ExitCode}). You may need to push assets manually using 'test-proxy push -a assets.json'");
+                }
+            }
+            catch (Exception ex)
+            {
+                logger.LogWarning(ex, "Failed to push test assets. Is test-proxy installed?");
+                response.NextSteps ??= [];
+                response.NextSteps.Add("Could not push test assets automatically. Ensure the test-proxy tool is installed and try running 'test-proxy push -a assets.json' manually");
+            }
+        }
+
+        /// <summary>
         /// Produces an API change list by diffing file contents between two generated source trees.
         /// Implementations may perform a structural or textual diff; when <paramref name="oldGenerationPath"/> is null
         /// they should treat the operation as an initial generation (returning an empty change list).
@@ -346,8 +400,39 @@ namespace Azure.Sdk.Tools.Cli.Services.Languages
             string packagePath,
             string buildContext,
             CancellationToken ct)
+            => ApplyPatchesAsync(customizationRoot, packagePath, buildContext, ct, 1, null);
+
+        /// <summary>
+        /// Applies patches in one agent session, validating the cumulative tool-recorded patches.
+        /// Failed validation feeds diagnostics back into the same conversation.
+        /// </summary>
+        /// <remarks>
+        /// Languages retain their original iteration budget plus maxAttempts - 1. MaxIterations
+        /// also counts missing-Exit reminders, so it is not AttemptsUsed; the caller caps validations.
+        /// </remarks>
+        public virtual Task<List<AppliedPatch>> ApplyPatchesAsync(
+            string customizationRoot,
+            string packagePath,
+            string buildContext,
+            CancellationToken ct,
+            int maxAttempts,
+            Func<IReadOnlyList<AppliedPatch>, Task<CopilotAgentValidationResult>>? validateResult)
         {
             return Task.FromResult(new List<AppliedPatch>());
+        }
+
+        /// <summary>
+        /// Performs language-specific pre-generation steps (e.g., pre-building plugins).
+        /// Called before tools run code generation.
+        /// The default implementation is a no-op. Override in language-specific subclasses as needed.
+        /// As of now, only the .NET language service overrides this to pre-build its generator plugin.
+        /// Implementations should warn and continue on failure rather than throwing.
+        /// </summary>
+        /// <param name="repoRoot">Absolute path to the SDK repository root.</param>
+        /// <param name="ct">Cancellation token.</param>
+        public virtual Task PreGenerateAsync(string repoRoot, CancellationToken ct)
+        {
+            return Task.CompletedTask;
         }
 
         /// <summary>
@@ -415,6 +500,91 @@ namespace Azure.Sdk.Tools.Cli.Services.Languages
         }
 
         /// <summary>
+        /// Validates classification of known breaking changes before returning actionable results.
+        /// Languages can add requirements without coupling the classifier to individual languages.
+        /// </summary>
+        /// <returns>An error message, or null when the classification is valid.</returns>
+        public virtual string? ValidateBreakingChangeClassification(SdkBreakingChangeDetectionResult classification)
+        {
+            if (!classification.HasBreakingChange || classification.BreakingChanges is not { Count: > 0 } ||
+                classification.BreakingChanges.Any(change => change == null))
+            {
+                return "No valid SDK breaking changes were classified from the detected SDK changes.";
+            }
+            return null;
+        }
+
+        public virtual Task<PackageOperationResponse> DetectSdkBreakingChangeAsync(string packagePath, CancellationToken ct)
+        {
+            return Task.FromResult(
+                new PackageOperationResponse
+                {
+                    ResponseError = $"SDK Breaking Change Detection is not implemented for language {Language}. Configure packageOptions.getSdkChangesScript in eng/swagger_to_sdk_config.json or supply a local SDK change report.",
+                    BreakingChangeStatus = SdkBreakingChangeStatus.Blocked,
+                    Language = Language,
+                    NextSteps = ["Configure the repository's SDK change detector or manually detect the SDK breaking changes."],
+                });
+        }
+
+        /// <summary>
+        /// Retrieves the breaking change pattern content for the current language.
+        /// </summary>
+        /// <param name="sdkRepoRoot">The root directory of the SDK repository.</param>
+        /// <param name="ct">Cancellation token for the operation.</param>
+        /// <returns>
+        /// The configured pattern file content, or an empty string when the catalog is unavailable.
+        /// Expected configuration and read failures are logged; cancellation still propagates.
+        /// </returns>
+        /// <remarks>
+        /// <para>
+        /// This method combines <paramref name="sdkRepoRoot"/> with the configured
+        /// packageOptions.sdkBreakingChangePatternFile. The pattern file contains language-specific
+        /// rules that define what TypeSpec/API changes constitute breaking changes in the generated SDK.
+        /// </para>
+        /// <para>
+        /// The returned content is typically used by AI agents or classification tools to analyze
+        /// SDK changes and provide mitigation guidance. The pattern content should describe:
+        /// - What SDK changes are considered breaking for the specific language
+        /// - How these changes impact client code
+        /// - Recommended mitigation strategies (e.g., client.tsp customizations)
+        /// </para>
+        /// <para>
+        /// See <see cref="DetectSdkBreakingChangeAsync"/> and the SdkBreakingChangeDetectTool
+        /// for usage examples where this pattern content is used in AI-powered classification.
+        /// </para>
+        /// </remarks>
+        public virtual async Task<string> GetSdkBreakingPattern(string sdkRepoRoot, CancellationToken ct)
+        {
+            ct.ThrowIfCancellationRequested();
+            try
+            {
+                var configuredPath = await specGenSdkConfigHelper.GetSdkBreakingChangePatternFileConfigurationAsync(sdkRepoRoot, ct);
+                ct.ThrowIfCancellationRequested();
+                if (string.IsNullOrWhiteSpace(configuredPath))
+                {
+                    logger.LogWarning("No SDK breaking change pattern catalog is configured for language {Language}.", Language);
+                    return string.Empty;
+                }
+                var path = Path.Combine(sdkRepoRoot, configuredPath);
+                logger.LogInformation("Loading SDK breaking change patterns from {Path}", path);
+                var patterns = await File.ReadAllTextAsync(path, ct);
+                ct.ThrowIfCancellationRequested();
+                if (string.IsNullOrWhiteSpace(patterns))
+                {
+                    logger.LogWarning("The SDK breaking change pattern catalog is empty: {Path}", path);
+                    return string.Empty;
+                }
+                return patterns;
+            }
+            catch (Exception ex) when (ex is IOException or UnauthorizedAccessException or JsonException or InvalidOperationException or ArgumentException)
+            {
+                ct.ThrowIfCancellationRequested();
+                logger.LogError(ex, "Unable to load SDK breaking change patterns for language {Language}.", Language);
+                return string.Empty;
+            }
+        }
+
+        /// <summary>
         /// Updates the version for a specified package.
         /// This method performs two steps:
         /// 1. Updates the release date in the changelog (common across all languages)
@@ -463,7 +633,8 @@ namespace Azure.Sdk.Tools.Cli.Services.Languages
 
             // releaseDate is already validated and defaulted by VersionUpdateTool
             // Determine whether to update just the date or replace the entire latest entry title
-            var changelogData = changelogHelper.ParseChangelog(changelogPath);
+            var languageHint = Language == Models.SdkLanguage.Python ? "python" : null;
+            var changelogData = changelogHelper.ParseChangelog(changelogPath, languageHint);
             if (changelogData == null)
             {
                 return PackageOperationResponse.CreateFailure(
@@ -493,13 +664,13 @@ namespace Azure.Sdk.Tools.Cli.Services.Languages
             {
                 // Version matches - only update the release date
                 logger.LogInformation("Latest changelog entry version matches target version {Version}. Updating release date only.", targetVersion);
-                changelogResult = changelogHelper.UpdateReleaseDate(changelogPath, targetVersion, releaseDate);
+                changelogResult = changelogHelper.UpdateReleaseDate(changelogPath, targetVersion, releaseDate, languageHint);
             }
             else
             {
                 // Version doesn't match - replace the latest entry title with new version and date
                 logger.LogInformation("Latest changelog entry version {LatestVersion} differs from target version {TargetVersion}. Replacing latest entry title.", latestEntry.Version, targetVersion);
-                changelogResult = changelogHelper.UpdateLatestEntryTitle(changelogPath, targetVersion, releaseDate);
+                changelogResult = changelogHelper.UpdateLatestEntryTitle(changelogPath, targetVersion, releaseDate, languageHint);
             }
 
             if (!changelogResult.Success)
@@ -588,9 +759,10 @@ namespace Azure.Sdk.Tools.Cli.Services.Languages
         /// </summary>
         /// <param name="packagePath">Absolute path to the SDK package directory.</param>
         /// <param name="timeoutMinutes">Maximum time to wait for the build process to complete.</param>
+        /// <param name="additionalArguments">Additional arguments to pass to the build command.</param>
         /// <param name="ct">Cancellation token.</param>
         /// <returns>A tuple containing: Success (bool), ErrorMessage (string? - null if successful), PackageInfo (PackageInfo? - package metadata if available).</returns>
-        public virtual async Task<(bool Success, string? ErrorMessage, PackageInfo? PackageInfo)> BuildAsync(string packagePath, int timeoutMinutes = 30, CancellationToken ct = default)
+        public virtual async Task<(bool Success, string? ErrorMessage, PackageInfo? PackageInfo)> BuildAsync(string packagePath, string? additionalArguments = null, int timeoutMinutes = 30, CancellationToken ct = default)
         {
             try
             {
@@ -647,6 +819,12 @@ namespace Azure.Sdk.Tools.Cli.Services.Languages
                 if (processOptions == null)
                 {
                     return (false, "Failed to create process options for build command.", packageInfo);
+                }
+
+                if (!string.IsNullOrEmpty(additionalArguments))
+                {
+                    var additionalArgs = specGenSdkConfigHelper.ParseCommand(additionalArguments);
+                    processOptions.Args.AddRange(additionalArgs);
                 }
 
                 // Execute the build process directly

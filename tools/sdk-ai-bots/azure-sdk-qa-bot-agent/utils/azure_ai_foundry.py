@@ -8,30 +8,63 @@ import asyncio
 import logging
 import re
 
-from agent_framework.azure import AzureOpenAIResponsesClient
+from agent_framework import TruncationStrategy
+from agent_framework.foundry import FoundryChatClient
 from azure.ai.projects.aio import AIProjectClient
-from openai import AsyncAzureOpenAI
-from opentelemetry.sdk.trace import SpanProcessor
+from openai import AsyncAzureOpenAI, AsyncOpenAI
 
-from config.app_config import get as cfg
+from config.app_config import Settings, get as cfg
 from utils.azure_credential import get_credential
 
 logger = logging.getLogger(__name__)
 
-_agent_client: AzureOpenAIResponsesClient | None = None
+# -- Compaction constants (token counts) -----------------------------------
+COMPACTION_TRIGGER_TOKENS = 100000
+COMPACTION_TARGET_TOKENS = 80000
+
+_agent_client: FoundryChatClient | None = None
 _project_client: AIProjectClient | None = None
-_openai_client = None
+_openai_clients: dict[str, AsyncOpenAI] = {}
 _embedding_client: AsyncAzureOpenAI | None = None
 
 
-def get_agent_client() -> AzureOpenAIResponsesClient:
-    """Return the shared AzureOpenAIResponsesClient (created once on first call)."""
+def create_project_client(
+    settings: Settings,
+) -> AIProjectClient:
+    """Create a project client from an explicit configuration scope."""
+    endpoint = settings("AI_FOUNDRY_PROJECT_ENDPOINT", None)
+    if not endpoint:
+        raise RuntimeError(
+            "AI_FOUNDRY_PROJECT_ENDPOINT is required in App Configuration."
+        )
+    return AIProjectClient(
+        endpoint=endpoint,
+        credential=get_credential(),
+        allow_preview=True,
+    )
+
+
+def create_openai_client(
+    project_client: AIProjectClient,
+    settings: Settings,
+) -> AsyncOpenAI:
+    """Create a hosted-agent OpenAI client from an explicit config scope."""
+    agent_name = settings("AI_FOUNDRY_AGENT_NAME", "azure-sdk-chat-agent")
+    return project_client.get_openai_client(agent_name=agent_name)
+
+
+def get_agent_client() -> FoundryChatClient:
+    """Return the shared FoundryChatClient (created once on first call)."""
     global _agent_client
     if _agent_client is None:
-        _agent_client = AzureOpenAIResponsesClient(
+        _agent_client = FoundryChatClient(
             project_endpoint=cfg("AI_FOUNDRY_PROJECT_ENDPOINT"),
-            deployment_name=cfg("AI_FOUNDRY_AGENT_COMPLETION_MODEL"),
+            model=cfg("AI_FOUNDRY_AGENT_COMPLETION_MODEL"),
             credential=get_credential(),
+            compaction_strategy=TruncationStrategy(
+                max_n=COMPACTION_TRIGGER_TOKENS,
+                compact_to=COMPACTION_TARGET_TOKENS,
+            ),
         )
     return _agent_client
 
@@ -40,19 +73,19 @@ def get_project_client() -> AIProjectClient:
     """Return the shared AIProjectClient (created once on first call)."""
     global _project_client
     if _project_client is None:
-        _project_client = AIProjectClient(
-            endpoint=cfg("AI_FOUNDRY_PROJECT_ENDPOINT"),
-            credential=get_credential(),
-        )
+        _project_client = create_project_client(cfg)
     return _project_client
 
 
-def get_openai_client():
-    """Return the shared OpenAI client (created once on first call)."""
-    global _openai_client
-    if _openai_client is None:
-        _openai_client = get_project_client().get_openai_client()
-    return _openai_client
+def get_openai_client(agent_name: str | None = None) -> AsyncOpenAI:
+    """Return the OpenAI client for a hosted agent."""
+    resolved_name = agent_name or cfg("AI_FOUNDRY_AGENT_NAME", "azure-sdk-chat-agent")
+    if resolved_name not in _openai_clients:
+        # Hosted agents in refreshed preview must be called via per-agent endpoint.
+        _openai_clients[resolved_name] = get_project_client().get_openai_client(
+            agent_name=resolved_name
+        )
+    return _openai_clients[resolved_name]
 
 
 def get_embedding_client() -> AsyncAzureOpenAI:
@@ -98,117 +131,37 @@ def _get_token_provider():
     return _provider
 
 
-# App Insights rejects telemetry items > 65 536 bytes.  The agent
-# framework records full tool arguments/results as span attributes
-# (``gen_ai.content.prompt`` / ``tool.call.results`` etc.) which can
-# easily exceed this limit for knowledge-heavy tools.  This processor
-# truncates oversized string attributes in ``on_end`` *before* the
-# Azure Monitor exporter serialises them, so the span still gets
-# exported with a truncation marker instead of being silently dropped.
-_MAX_ATTR_VALUE_LEN = 8192  # 8 KB per attribute — well under the 65 KB item limit
-
-
-class SpanAttributeTruncator(SpanProcessor):
-    """Truncate large span attribute values so App Insights does not drop them."""
-
-    def __init__(self, max_len: int = _MAX_ATTR_VALUE_LEN) -> None:
-        self._max_len = max_len
-
-    def on_start(self, span, parent_context=None) -> None:  # noqa: D401
-        pass
-
-    def on_end(self, span) -> None:
-        raw_attrs = getattr(span, "_attributes", None)
-        if raw_attrs is None:
-            return
-        for key in list(raw_attrs.keys()):
-            val = raw_attrs.get(key)
-            if isinstance(val, str) and len(val) > self._max_len:
-                raw_attrs[key] = (
-                    val[: self._max_len] + f"... [truncated from {len(val)} chars]"
-                )
-
-    def shutdown(self) -> None:
-        pass
-
-    def force_flush(self, timeout_millis=None) -> bool:
-        return True
-
-
-class FoundryAgentSpanEnricher(SpanProcessor):
-    """Enriches the top-level ``HostedAgents-*`` span emitted by the platform.
-
-    The platform emits a root span named ``HostedAgents-<response_id>`` with
-    ``gen_ai.provider.name = "AzureAI Hosted Agents"`` and sets
-    ``azure.ai.agentserver.conversation_id`` — but **not**
-    ``gen_ai.conversation.id``.  Without the standard key the Foundry Traces
-    "Conversations" tab shows ``--``.
-
-    This processor copies the conversation id to the standard attribute in
-    ``on_end`` (after the platform has set it).  It does **not** touch child
-    ``chat`` or ``execute_tool`` spans — enriching those would create
-    duplicate rows in the Traces view because each carries a distinct
-    ``response_id``.
-    """
-
-    def __init__(self, project_id: str, agent_name: str, agent_id: str) -> None:
-        self._project_id = project_id
-        self._agent_name = agent_name
-        self._agent_id = agent_id
-
-    @staticmethod
-    def _is_hosted_agent_span(span) -> bool:
-        """Return True for the platform's top-level span."""
-        attrs = getattr(span, "attributes", None) or {}
-        return (
-            attrs.get("gen_ai.provider.name") == "AzureAI Hosted Agents"
-            or attrs.get("gen_ai.operation.name") == "invoke_agent"
-        )
-
-    def on_start(self, span, parent_context=None) -> None:
-        """Inject Foundry attributes on the top-level span."""
-        if not self._is_hosted_agent_span(span):
-            return
-        span.set_attribute("microsoft.foundry.project.id", self._project_id)
-        span.set_attribute("gen_ai.agent.name", self._agent_name)
-        span.set_attribute("gen_ai.agent.id", self._agent_id)
-
-    def on_end(self, span) -> None:
-        if not self._is_hosted_agent_span(span):
-            return
-        # Copy conversation id to the standard attribute if missing
-        raw_attrs = getattr(span, "_attributes", None)
-        if raw_attrs is None:
-            return
-        conv_id = raw_attrs.get("azure.ai.agentserver.conversation_id")
-        if conv_id and not raw_attrs.get("gen_ai.conversation.id"):
-            raw_attrs["gen_ai.conversation.id"] = conv_id
-        logger.debug(
-            "Span ended: name=%s conv=%s agent=%s",
-            span.name,
-            conv_id,
-            raw_attrs.get("gen_ai.agent.name"),
-        )
-
-    def shutdown(self) -> None:
-        pass
-
-    def force_flush(self, timeout_millis=None) -> bool:
-        return True
-
-
 async def close_clients() -> None:
     """Close all clients.  Safe to call even if never created."""
-    global _agent_client, _project_client, _openai_client, _embedding_client
+    global _agent_client, _project_client, _embedding_client
     if _embedding_client is not None:
         await _embedding_client.close()
         _embedding_client = None
-    if _openai_client is not None:
-        await _openai_client.close()
-        _openai_client = None
+    for client in _openai_clients.values():
+        await client.close()
+    _openai_clients.clear()
     if _agent_client is not None:
-        await _agent_client.close()
         _agent_client = None
     if _project_client is not None:
         await _project_client.close()
         _project_client = None
+
+
+# -- Stateless warm-session cache ------------------------------------------
+# Stateless requests (no customer conversation_id) share one warm sandbox per
+# agent via a stable agent_session_id captured from the first stateless response.
+# No `conversation` is threaded, so history is never shared across callers.
+_stateless_session_ids: dict[str, str] = {}
+
+
+def get_stateless_session_id(agent_name: str) -> str | None:
+    """Return the cached warm sandbox id for stateless requests, if any."""
+    return _stateless_session_ids.get(agent_name)
+
+
+def set_stateless_session_id(agent_name: str, session_id: str | None) -> None:
+    """Cache (or clear) the warm sandbox id reused by stateless requests."""
+    if session_id is None:
+        _stateless_session_ids.pop(agent_name, None)
+    else:
+        _stateless_session_ids[agent_name] = session_id

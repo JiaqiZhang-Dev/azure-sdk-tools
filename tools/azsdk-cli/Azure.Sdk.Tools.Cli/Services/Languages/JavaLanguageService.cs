@@ -246,9 +246,8 @@ public sealed partial class JavaLanguageService : LanguageService
     /// <returns>A <see cref="TestRunResponse"/> containing test execution details.</returns>
     public override async Task<TestRunResponse> RunAllTests(string packagePath, TestMode testMode = TestMode.Playback, IDictionary<string, string>? liveTestEnvironment = null, TimeSpan? timeout = null, CancellationToken ct = default)
     {
-        logger.LogInformation("Starting test execution for Java project at: {PackagePath}", packagePath);
+        logger.LogInformation("Starting test execution for Java project at: {PackagePath} in {TestMode} mode", packagePath, testMode);
 
-        // Run Maven tests using consistent command pattern
         if (!TryGetPomFilePath(packagePath, out var pomPath))
         {
             logger.LogError("Cannot run tests - no pom.xml found at {PackagePath}", packagePath);
@@ -258,16 +257,36 @@ public sealed partial class JavaLanguageService : LanguageService
                 error: "pom.xml not found");
         }
 
-        var result = await mavenHelper.Run(new("test", ["--no-transfer-progress"], pomPath, workingDirectory: packagePath, timeout: timeout ?? testTimeout), ct);
-
-        if (result.ExitCode != 0)
+        var envVars = new Dictionary<string, string>(StringComparer.OrdinalIgnoreCase)
         {
-            logger.LogWarning("Test execution failed with exit code {ExitCode}", result.ExitCode);
-            return new TestRunResponse(result);
+            ["AZURE_TEST_MODE"] = testMode.ToString().ToUpperInvariant()
+        };
+
+        if (liveTestEnvironment != null)
+        {
+            foreach (var (key, value) in liveTestEnvironment)
+            {
+                envVars[key] = value;
+            }
         }
 
-        logger.LogInformation("Test execution completed successfully");
-        return new TestRunResponse(result);
+        // Use caller-provided timeout if specified, otherwise use mode-based defaults
+        timeout ??= testMode == TestMode.Playback
+            ? testTimeout
+            : TimeSpan.FromMinutes(15);
+
+        var result = await mavenHelper.Run(
+            new("test", ["--no-transfer-progress"], pomPath, workingDirectory: packagePath, timeout: timeout, environmentVariables: envVars), ct);
+
+        var response = new TestRunResponse(result);
+
+        // After successful record mode, push test assets to the assets repo
+        if (testMode == TestMode.Record && result.ExitCode == 0)
+        {
+            await PushTestAssets(packagePath, response, ct);
+        }
+
+        return response;
     }
 
     public override async Task<(bool Success, string? ErrorMessage, PackageInfo? PackageInfo, string? ArtifactPath)> PackAsync(
@@ -355,11 +374,20 @@ public sealed partial class JavaLanguageService : LanguageService
     /// Applies patches to customization files based on build errors.
     /// This is a mechanical worker - the Classifier does the thinking and routing.
     /// </summary>
-    public override async Task<List<AppliedPatch>> ApplyPatchesAsync(
+    public override Task<List<AppliedPatch>> ApplyPatchesAsync(
         string customizationRoot,
         string packagePath,
         string buildContext,
         CancellationToken ct)
+        => ApplyPatchesAsync(customizationRoot, packagePath, buildContext, ct, 1, null);
+
+    public override async Task<List<AppliedPatch>> ApplyPatchesAsync(
+        string customizationRoot,
+        string packagePath,
+        string buildContext,
+        CancellationToken ct,
+        int maxAttempts,
+        Func<IReadOnlyList<AppliedPatch>, Task<CopilotAgentValidationResult>>? validateResult)
     {
         try
         {
@@ -394,11 +422,12 @@ public sealed partial class JavaLanguageService : LanguageService
                 customizationFiles,
                 patchFilePaths).BuildPrompt();
 
-            // Single-pass agent: applies all patches it can in one run
+            // Validation retries retain the same agent session and cumulative patch log.
             var agentDefinition = new CopilotAgent<string>
             {
                 Instructions = prompt,
-                MaxIterations = 10,
+                MaxIterations = 10 + maxAttempts - 1,
+                ValidateResult = validateResult == null ? null : _ => validateResult(patchLog.ToList()),
                 Tools =
                 [
                     FileTools.CreateReadFileTool(packagePath, includeLineNumbers: true,
@@ -433,6 +462,7 @@ public sealed partial class JavaLanguageService : LanguageService
             logger.LogInformation("Patch application completed, patches applied: {PatchCount}", appliedPatches.Count);
             return appliedPatches;
         }
+        catch (OperationCanceledException) { throw; }
         catch (Exception ex)
         {
             logger.LogError(ex, "Failed to apply patches");

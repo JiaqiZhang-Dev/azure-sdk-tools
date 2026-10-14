@@ -3,6 +3,7 @@ import { ThinkingHandler } from '../src/turn/ThinkingHandler.js';
 import { ConversationHandler, Prompt } from '../src/input/ConversationHandler.js';
 import { CompletionResponsePayload, RagApiError, ErrorCode, ErrorCategory } from '../src/backend/rag.js';
 import { TurnContext } from 'botbuilder';
+import config from '../src/config/config.js';
 
 // Mock dependencies
 vi.mock('../src/logging/utils.js', () => ({
@@ -23,6 +24,10 @@ vi.mock('../src/cards/components/contact.js', () => ({
 
 vi.mock('../src/config/config.js', () => ({
   contactCardVersion: '1.0',
+  default: {
+    showReferences: true,
+    botDisplayName: 'Parikh Public Lens',
+  },
 }));
 
 vi.mock('node:timers/promises', () => ({
@@ -35,6 +40,7 @@ describe('ThinkingHandler', () => {
   let mockConversationHandler: Partial<ConversationHandler>;
 
   beforeEach(() => {
+    config.showReferences = true;
     // Mock TurnContext
     mockContext = {
       activity: {
@@ -154,6 +160,18 @@ describe('ThinkingHandler', () => {
       expect(result.answer).toBe('This is a test answer without references');
       expect(result.answer).not.toContain('**References**');
       expect(result.isError).toBe(false);
+    });
+
+    it('should omit references when disabled for the avatar', () => {
+      config.showReferences = false;
+      const result = (thinkingHandler as any).generateAnswer({
+        id: 'test-id',
+        answer: 'Avatar answer',
+        has_result: true,
+        references: [{ title: 'Reference', source: 'source', link: 'https://example.com', content: 'content' }],
+      });
+
+      expect(result).toEqual({ answer: 'Avatar answer', isError: false });
     });
   });
 
@@ -327,6 +345,15 @@ describe('ThinkingHandler', () => {
         type: 'message',
         id: undefined, // resourceId is undefined in this test
         text: "🚫Sorry, I'm having some validation issues right now and can't answer your question. Error: Message content cannot be empty.",
+        textFormat: 'markdown',
+        entities: [
+          {
+            type: 'https://schema.org/Message',
+            '@type': 'Message',
+            '@context': 'https://schema.org',
+            additionalType: ['AIGeneratedContent'],
+          },
+        ],
         conversation: mockContext.activity?.conversation,
       });
     });
@@ -354,8 +381,81 @@ describe('ThinkingHandler', () => {
         type: 'message',
         id: undefined,
         text: "🚫Sorry, I'm having some service issues right now and can't answer your question. Please try again later. Error: LLM model is currently overloaded.",
+        textFormat: 'markdown',
+        entities: [
+          {
+            type: 'https://schema.org/Message',
+            '@type': 'Message',
+            '@context': 'https://schema.org',
+            additionalType: ['AIGeneratedContent'],
+          },
+        ],
         conversation: mockContext.activity?.conversation,
       });
+    });
+
+    it('should add AI-generated and trace labels to successful responses', async () => {
+      const successResponse: CompletionResponsePayload = {
+        id: 'test-id',
+        answer: 'This is a successful response',
+        has_result: true,
+        references: [],
+        trace_id: 'test-trace-id',
+      };
+      const mockPrompt: Prompt = {
+        textWithoutMention: 'Test prompt',
+        userName: 'TestUser',
+        userID: 'user-123',
+        timestamp: new Date(),
+        conversationID: 'test-conversation',
+      };
+
+      await thinkingHandler.stop(new Date(), successResponse, mockPrompt);
+
+      expect(mockContext.updateActivity).toHaveBeenCalledWith({
+        type: 'message',
+        id: undefined,
+        text: 'This is a successful response<br/><hr/>💡 If you have follow-up questions after my response, please @Parikh Public Lens to continue the conversation.',
+        textFormat: 'markdown',
+        entities: [
+          {
+            type: 'https://schema.org/Message',
+            '@type': 'Message',
+            '@context': 'https://schema.org',
+            additionalType: ['AIGeneratedContent'],
+            usageInfo: {
+              type: 'https://schema.org/Message',
+              '@type': 'CreativeWork',
+              name: 'Internal Tracking',
+              description: 'Trace ID: test-trace-id',
+            },
+          },
+        ],
+        conversation: mockContext.activity?.conversation,
+      });
+    });
+
+    it('should preserve response tracking and Teams paragraph breaks without a trace ID', async () => {
+      const mockPrompt: Prompt = {
+        textWithoutMention: 'Test prompt',
+        userName: 'TestUser',
+        userID: 'user-123',
+        timestamp: new Date(),
+        conversationID: 'test-conversation',
+      };
+
+      await thinkingHandler.stop(new Date(), {
+        id: 'response-id',
+        answer: 'First paragraph\n\nSecond paragraph',
+        has_result: true,
+      }, mockPrompt);
+
+      expect(mockContext.updateActivity).toHaveBeenCalledWith(expect.objectContaining({
+        text: 'First paragraph<br/><br/>Second paragraph<br/><hr/>💡 If you have follow-up questions after my response, please @Parikh Public Lens to continue the conversation.',
+        entities: [expect.objectContaining({
+          usageInfo: expect.objectContaining({ description: 'Response ID: response-id' }),
+        })],
+      }));
     });
   });
 });

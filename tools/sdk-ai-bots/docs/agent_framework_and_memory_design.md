@@ -1,18 +1,18 @@
 # Agent Framework and Memory Design
 
-## 1 Overview
+## 1 Background
 
-We are building a new agent service (`azure-sdk-qa-bot-agent`) based on the Azure AI Foundry Agent framework to replace the existing Go backend (`azure-sdk-qa-bot-backend`) built on a custom RAG framework. The motivations for this migration are:
+We are building an agent service (`azure-sdk-qa-bot-agent`) based on the Azure AI Foundry Agent framework, replacing an earlier RAG-based implementation. The motivations for this design are:
 
-- **Rigid workflow** — The Go backend uses a hard-coded workflow that is difficult to extend. Adding new capabilities requires modifying core code rather than configuration.
-- **No tool abstraction** — Search, analysis, prompt building, and LLM calls are all inline with no separation of concerns.
-- **Ecosystem mismatch** — Go is misaligned with the Python-first AI/LLM ecosystem (Azure AI Agents SDK, prompt frameworks, evaluation tooling).
+- **Flexible workflow** — The agent framework favors configuration over hard-coded workflows, so new capabilities can be added without modifying core code.
+- **Tool abstraction** — Search, analysis, prompt building, and LLM calls are separated into discrete tools with clear separation of concerns.
+- **Ecosystem alignment** — Python aligns with the AI/LLM ecosystem (Azure AI Agents SDK, prompt frameworks, evaluation tooling).
 
 ### 1.1 Agent Framework — GitHub Copilot SDK vs Azure AI Foundry Agent SDK
 
 > **References:**
 > - [GitHub Copilot SDK](https://github.com/github/copilot-sdk)
-> - [Azure AI Foundry Agents](https://learn.microsoft.com/en-us/azure/foundry/agents/overview)
+> - [Azure AI Foundry Agents](https://learn.microsoft.com/azure/foundry/agents/overview)
 
 | | GitHub Copilot SDK | Azure AI Foundry Agent SDK |
 |---|---|---|
@@ -49,10 +49,10 @@ We are building a new agent service (`azure-sdk-qa-bot-agent`) based on the Azur
 
 ![Agent lifecycle](images/agent_lifecycle.png)
 
-### 1.2 Memory — AI Foundry Built-in Memory vs Self-hosted Memory
+### 1.2 Memory — Hybrid Approach (AI Foundry Memory + Cosmos DB Episodes)
 
 > **References:**
-> - [AI Foundry Memory](https://learn.microsoft.com/en-us/azure/foundry/agents/concepts/what-is-memory?tabs=conversational-agent)
+> - [AI Foundry Memory](https://learn.microsoft.com/azure/foundry/agents/concepts/what-is-memory?tabs=conversational-agent)
 > - [AI Agent Memory Concepts](https://www.geeksforgeeks.org/artificial-intelligence/ai-agent-memory/)
 
 AI Agent Memory is the ability of an agent to store, recall, and use information from past interactions to make better decisions. Without memory, an agent treats every interaction as if it were the first. With memory, an agent can maintain context, adapt to users, and improve over time — gaining continuity, context-awareness, and learning abilities.
@@ -65,51 +65,199 @@ AI Agent Memory is the ability of an agent to store, recall, and use information
 | Filtered queries (by repo, language, service) | Semantic search only, no field-level filters | Structured filters + semantic search |
 | Stability | Public preview — API and behavior may change | Production GA services |
 
-**Decision:** We chose AI Foundry built-in Memory for its simplicity and lower implementation cost. While self-hosted memory offers more control, the AI Foundry memory ecosystem is actively improving, and the additional effort of building and maintaining a custom memory layer is not justified at this stage.
+**Decision:** We adopted a **hybrid memory architecture** that combines both approaches:
+
+1. **AI Foundry Memory Store** — used for **user-scoped memory** (personal preferences, SDK/language context, working patterns). Foundry handles automatic user-profile extraction and chat-summary consolidation, providing low-cost per-user personalisation.
+2. **Self-hosted Cosmos DB** — used for **expert experience episodes** (structured problem-solution pairs with reasoning chains). Episodes require a custom schema, deterministic IDs for upsert, vector embeddings for similarity search, and tenant-scoped partitioning — capabilities that Foundry Memory does not support.
+
+This gives us the simplicity of Foundry for per-user context while retaining full control over the structured knowledge base that drives expert-level answer quality.
 
 ## 2 Design
 
-### 2.1 Overview
+### 2.1 Architecture
 
 ![Architecture diagram](images/architecture_diagram.png)
 
-#### 2.1.1 Q&A Workflow
+The system consists of two deployable services and a set of offline pipelines:
 
-**Before:**
+| Component | Description |
+| --- | --- |
+| **Backend Server** (`azure-sdk-qa-bot-agent/server.py`) | A FastAPI service that the Teams App communicates with. Handles chat requests by calling the hosted Chat Agent via the Azure AI Foundry SDK, manages conversations, feedback, and memory episode extraction. |
+| **Chat Agent** (`azure-sdk-qa-bot-agent/agents/chat_agent/`) | A hosted container agent deployed to Microsoft Foundry. Binds a model, instructions, tools, skills, and memory context providers into a single `Agent` instance, exposed via the Responses protocol. |
+| **Knowledge Sync** (`azure-sdk-qa-bot-knowledge-sync/`) | A scheduled App Service WebJob that syncs documents from sources daily, detects changes, updates Azure Storage, and triggers Azure AI Search reindexing. |
 
-![Q&A workflow — before](images/qa_workflow_before.png)
+### 2.2 Agent Design
 
-**After:**
+The Chat Agent is the core intelligence of the system. It is built on the `agent_framework` library and deployed as a Foundry hosted agent.
+
+#### 2.2.1 Agent Configuration
+
+The agent is configured with the following components:
+
+| Component | Purpose |
+| --- | --- |
+| **Instruction** | System prompt defining the agent's role, behavior, and response format. |
+| **Tools** | `KnowledgeTools.search_knowledge_base` and `KnowledgeTools.wiki_search` (AI Search), `WebTools.web_fetch`, `web_search` (Bing grounding), ADO MCP tool, Azure SDK MCP tool, GitHub MCP tool. |
+| **Skills** | Tenant-specific skills auto-generated from tenant config. Each tenant becomes a `Skill` with a description (for routing) and content (QA guideline + knowledge source names). The agent self-routes to the correct tenant. |
+| **Context Providers** | `SkillsProvider` (injects active skill context), `MemoryContextProvider` (injects user + expert memories), `CompactionProvider` (compacts tool-call history to manage context size). |
+
+#### 2.2.2 Tools
+
+Tools are capabilities the agent can invoke during reasoning:
+
+| Tool | Type | Description |
+| --- | --- | --- |
+| `search_knowledge_base` | `FunctionTool` | Retrieves raw source chunks with fused vector and BM25 search, plus agentic retrieval in deep mode. Automatically expands results by header hierarchy to return full section context. |
+| `wiki_search` | `FunctionTool` | Retrieves synthesized wiki pages and the bounded source chunks referenced by those pages. |
+| `web_fetch` | `FunctionTool` | Fetches and extracts content from a given URL. |
+| `azsdk_analyze_pipeline` | `FunctionTool` | Analyzes Azure SDK CI pipeline runs to diagnose failures. |
+| `web_search` | Built-in | Bing web search for grounding with real-time information. |
+| ADO MCP | MCP Server | Read-only Azure DevOps pipeline and build lookup. |
+| GitHub MCP | MCP Server | GitHub integration for issue/PR lookup. |
+
+#### 2.2.3 Skills
+
+Each tenant (Teams channel) is mapped to a `Skill` that bundles:
+
+- A **description** (~100 tokens) advertised in the system prompt for the agent to match incoming questions.
+- A **QA guideline** (`azure-sdk-qa-bot-agent/prompts/tenants/*.md`) defining the bot's role, scope, and response style for that channel.
+- **Knowledge sources** so the agent passes the correct sources to `search_knowledge_base`.
+
+Supported tenants include: TypeSpec Discussion, Azure SDK Onboarding, Azure TypeSpec Authoring, API Spec Review, Python SDK, .NET SDK, and more.
+
+### 2.3 Knowledge Base
+
+#### 2.3.1 Data Sources
+
+Imported knowledge sources include:
+
+- TypeSpec related documents
+- Azure Specs Docs
+- API Guidelines
+- RPC guidelines
+- ......
+
+The Knowledge Sync Service runs as a scheduled WebJob to sync documents from sources daily. It detects changed and deleted files and updates them in Azure Storage, then triggers Azure AI Search to reindex the changed documents.
+
+#### 2.3.2 Data Preprocessing & Indexing
+
+All knowledge is converted to markdown format for consistency.
+
+**Chunking** — Content is split into blocks for two reasons:
+
+1. **Token limit** — Embedding models have token limits (e.g., OpenAI `text-embedding-ada-002` has an 8191 token input limit).
+2. **Semantic clarity** — Long content with many topics produces vectors that cannot represent the content meaning clearly, affecting retrieval performance.
+
+An Azure AI Search Indexer automatically splits markdown files into chunks using **Markdown** parsing mode with **H3** header depth.
+
+#### 2.3.3 Knowledge Retrieval
+
+The `search_knowledge_base` tool supports two search modes:
+
+- **Quick** — Vector and BM25 keyword search in parallel.
+- **Deep** — Agentic, vector, and BM25 keyword search in parallel. The agentic retriever decomposes a complex query into focused subqueries for better coverage.
+
+The ranked lists are fused with reciprocal-rank fusion before deduplication and hierarchy expansion. `wiki_search` uses the same retrieval pipeline over wiki pages, then routes each selected page through `chunk_refs` to its original source chunks.
+
+Both modes use:
+
+- **Proper Noun Replacement** — Abbreviations in queries are replaced with proper nouns via configuration (e.g., ARM → Azure Resource Management, TCGC → typespec-client-generator-core) to improve search performance.
+- **Vector + Keyword Search** — Queries Azure AI Search with both keyword and vectorized queries.
+- **Semantic Reranking** — A semantic configuration ranks results by title, content, and keyword fields.
+- **Context Expansion** — High-scoring chunks are expanded to their full document section via the header hierarchy, giving the agent richer context.
+
+### 2.4 Memory Design
+
+#### 2.4.1 Memory Types
+
+AI Foundry Memory Store provides two built-in types of long-term memory (see [Foundry Memory — Memory Types](https://learn.microsoft.com/azure/foundry/agents/concepts/what-is-memory?tabs=conversational-agent#memory-types)):
+
+- **User profile memory** — Information and preferences *about the user* (e.g., preferred name, SDK language, working patterns). These are considered "static" with respect to a conversation because they don't depend on the current chat context. They are retrieved **once at the start of each session**.
+- **Chat summary memory** — A distilled summary of each topic covered in prior chat sessions. These allow users to continue conversations or reference earlier sessions without repeating context. They are retrieved **every turn** using the current input messages as search items.
+
+In addition to the two Foundry-managed types, we maintain a third type — **expert episodes** — in a self-hosted Cosmos DB store for structured knowledge that requires custom schema and vector search.
+
+The two memory categories differ in their **data source**:
+
+- **User memory** (profile + chat summary) is derived from **the user's messages and the agent's responses**. Every time a user interacts with the bot, the exchange is used to build and update that user's memory. It captures what this specific user cares about and what they've discussed with the bot.
+- **Expert episodes** are derived from **the full conversation thread including all participants**. They are only extracted when a human expert (someone other than the original poster or the bot) replies in the thread. The value comes from expert reasoning, so the entire multi-party thread is sent for episode extraction.
+
+| Memory Type | Store | Scope | Description |
+| --- | --- | --- | --- |
+| **User profile** (static) | AI Foundry Memory Store | Per user (`user_{user_id}`) | Personal preferences, SDK/language, project context. Fetched once per session via `search_memories` with no query items. |
+| **User contextual** (chat summary) | AI Foundry Memory Store | Per user (`user_{user_id}`) | Conversation-relevant memories retrieved every turn using input messages as search items. Incremental via `previous_search_id`. |
+| **Expert episodes** (tenant) | Cosmos DB `experience-episodes` | Per tenant (`tenant_id` partition key) | Structured problem-solution pairs extracted from expert-resolved threads. Retrieved via cosine vector similarity search against the user's current question. |
+
+#### 2.4.2 Key Components
+
+| Component | Purpose |
+| --- | --- |
+| `utils/memory_context_provider.py` | `MemoryContextProvider` — retrieves and injects memories before each agent turn, updates user store after. |
+| `utils/azure_memory_store.py` | Foundry Memory Store helpers — store creation, config accessors, scope sanitization. |
+| `services/thread_memory_service.py` | `ThreadMemoryService` — extracts episodes from expert-resolved threads and stores in Cosmos DB. |
+| `prompts/episode_extraction.md` | LLM prompt for structured episode extraction. |
+
+#### 2.4.3 Memory Lifecycle
+
+##### Write Path — User Memory
+
+After each agent response, `MemoryContextProvider.after_run` collects user + assistant messages and submits them to the Foundry Memory Store via `begin_update_memories`. Foundry asynchronously extracts and consolidates user-profile facts. A configurable `update_delay` (default 300 s) controls how soon updates are processed.
+
+##### Write Path — Expert Episodes
+
+When a conversation message is saved via `/conversation/save`, `ThreadMemoryService.process_thread_update` runs as a background task:
+
+1. **Quality gate** — Only triggers when the latest message is from an expert (not the original poster or the bot).
+2. **LLM extraction** — Sends the full thread transcript to `chat.completions` with a structured episode-extraction prompt (`prompts/episode_extraction.md`). The LLM returns a JSON `Episode` or `null` if the thread is unresolved or low-value.
+3. **Embedding** — Generates a vector embedding of `trigger + symptoms` using the configured embedding model (default `text-embedding-3-small`).
+4. **Upsert** — Stores the `EpisodeDocument` in the `experience-episodes` Cosmos DB container with a deterministic ID (`episode-{tenant_id}-{source_thread_id}`), so re-extractions as the thread grows replace previous versions.
+
+##### Read Path — Before Each Agent Turn
+
+`MemoryContextProvider.before_run` assembles memory context before model invocation:
+
+1. **Resolve scopes** — Extracts `user_scope` from `[memory_scope] value=…` marker and `tenant_scope` from `[tenant_context] original_tenant_id=…` marker in input messages.
+2. **Fetch static user memories** — On first turn only (per session), queries the user store with no items to retrieve user-profile memories.
+3. **Search contextual user memories** — Every turn, searches the user store using input messages as items (incremental via `previous_search_id`).
+4. **Search expert episodes** — Generates an embedding of the latest user message and performs a Cosmos DB `VectorDistance` query within the tenant partition. Results are filtered by a similarity threshold (default 0.80, top-k default 2).
+5. **Inject context** — Formats all memories into a system message with `## User memories` and `## Expert experience` sections and injects it into the agent context.
+
+#### 2.4.4 Episode Schema
+
+Episodes stored in Cosmos DB follow a structured schema (`models/episode.py`):
+
+| Field | Description |
+| --- | --- |
+| `trigger` | The symptom or question that started the thread. |
+| `symptoms` | Observable signs — error messages, unexpected behavior. |
+| `reasoning_chain` | Step-by-step diagnostic process the expert followed (min 2 steps). |
+| `resolution` | What ultimately fixed the problem or answered the question. |
+| `key_insight` | Generalizable takeaway that applies beyond this specific case. |
+| `confidence` | Extraction confidence (0–1). Episodes below 0.5 are discarded. |
+
+The `EpisodeDocument` extends this with storage fields: `id`, `tenant_id`, `source_thread_id`, `message_count`, `embedding`, and timestamps.
+
+### 2.5 Workflows & Interaction Design
+
+#### 2.5.1 Q&A
 
 ![Q&A workflow — after](images/qa_workflow_after.png)
 
-#### 2.1.2 Feedback Workflow
+![Q&A interaction diagram](images/qa_interact_diagram.png)
 
-**Before:**
-
-![Feedback workflow — before](images/feedback_workflow_before.png)
-
-**After:**
+#### 2.5.2 Feedback
 
 ![Feedback workflow — after](images/feedback_workflow_after.png)
 
-### 2.2 Interaction Design
-
-#### 2.2.1 Q&A
-
-![Q&A interaction diagram](images/qa_interact_diagram.png)
-
-#### 2.2.2 Feedback
-
 ![Feedback interaction diagram](images/feedback_interact_diagram.png)
 
-### 2.3 API Design
+### 2.6 API Design
 
-See the [TypeSpec definitions](../azure-sdk-qa-bot-agent/tsp).
+See the [TypeSpec definitions](https://github.com/Azure/azure-sdk-tools/tree/main/tools/sdk-ai-bots/azure-sdk-qa-bot-agent/tsp).
 
 ## 3 Project Structure
 
-See the [Project directory](../azure-sdk-qa-bot-agent).
+See the [Project directory](https://github.com/Azure/azure-sdk-tools/tree/main/tools/sdk-ai-bots/azure-sdk-qa-bot-agent).
 
 ## 4 Evaluation
 

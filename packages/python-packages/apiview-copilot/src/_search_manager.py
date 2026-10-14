@@ -13,6 +13,7 @@ from collections import deque
 from typing import Dict, List, Optional
 
 from azure.search.documents import SearchClient, SearchItemPaged
+
 from azure.search.documents.indexes import SearchIndexerClient
 from azure.search.documents.models import (
     QueryAnswerResult,
@@ -285,7 +286,13 @@ class ContextItem:
 class SearchManager:
     """Manages search operations using Azure Search."""
 
-    def __init__(self, *, language: Optional[str] = None, include_general_guidelines: bool = False):
+    def __init__(
+        self,
+        *,
+        language: Optional[str] = None,
+        include_general_guidelines: bool = False,
+        environment: Optional[str] = None,
+    ):
         self.language = language
         self.filter_expression = None
         if language:
@@ -296,7 +303,7 @@ class SearchManager:
                 self.filter_expression += f" or {general_guidelines_filter}"
             else:
                 self.filter_expression = general_guidelines_filter
-        self._settings = SettingsManager()
+        self._settings = SettingsManager(environment=environment)
         self._search_endpoint = self._settings.get("SEARCH_ENDPOINT")
         self._credential = get_credential()
         self._index_name = self._settings.get("SEARCH_INDEX_NAME")

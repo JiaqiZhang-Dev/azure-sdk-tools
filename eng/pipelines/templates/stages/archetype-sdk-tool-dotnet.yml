@@ -35,6 +35,9 @@ parameters:
   - name: ReleaseBinaries
     type: boolean
     default: false
+  - name: ReleaseToAzsdkArtifacts
+    type: boolean
+    default: false
   - name: ShouldPublishSymbols
     type: boolean
     default: true
@@ -71,6 +74,9 @@ parameters:
   - name: CustomReleaseJobs
     type: jobList
     default: []
+  - name: ForceCreate
+    type: boolean
+    default: false
 
 extends:
   template: /eng/pipelines/templates/stages/1es-redirect.yml
@@ -237,6 +243,7 @@ extends:
             Feed: 'public/azure-sdk-for-net'
             ExeMatrix: ${{ parameters.StandaloneExeMatrix }}
             ShouldPublishExecutables: ${{ parameters.ReleaseBinaries }}
+            ShouldPublishToAzsdkArtifacts: ${{ parameters.ReleaseToAzsdkArtifacts }}
             ShouldPublishSymbols: ${{ parameters.ShouldPublishSymbols }}
             RequireStrongNames: ${{ parameters.RequireStrongNames }}
             ${{ if parameters.PublishEnvironment }}:
@@ -245,6 +252,7 @@ extends:
             VerifyChangelog: ${{ parameters.VerifyChangelog }}
             ToolDirectory: '${{ coalesce(parameters.PackageDirectory, parameters.ToolDirectory) }}'
             CustomReleaseJobs: ${{ parameters.CustomReleaseJobs }}
+            ForceCreate: ${{ parameters.ForceCreate }}
 
       - ${{ if and(ne(parameters.SkipReleaseStage, true), not(eq(length(parameters.DockerDeployments), 0)), ne(variables['Build.Reason'], 'PullRequest'), eq(variables['System.TeamProject'], 'internal'))}}:
         - stage: PublishDockerImages

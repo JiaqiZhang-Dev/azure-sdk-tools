@@ -9,8 +9,9 @@ import logging
 import re
 from urllib.parse import urlparse
 
-from config.app_config import get as cfg
+from config.app_config import Settings, get as cfg
 from config.tenant_config import (
+    TenantConfig,
     get_tenant_config,
     get_tenant_scope_description,
 )
@@ -23,19 +24,32 @@ from models.chat import (
     ConversationItem,
     Role,
 )
-from models.conversation import ConversationMessage
-from models.knowledge import Reference
+from models.conversation import ConversationMessage, ConversationType
+from models.knowledge import DocumentContext, Reference, SearchKnowledgeBaseResult
 from services.conversation_service import ConversationService
 from tools import TOOL_REGISTRY
-from skills.tenant_skills import get_skill_to_tenant_map
-from utils.azure_ai_foundry import get_openai_client, get_project_client
+from skills.tenant_skills import (
+    build_skill_content,
+    get_skill_name_for_tenant,
+    get_skill_to_tenant_map,
+)
+from utils.azure_ai_foundry import (
+    get_openai_client,
+    get_project_client,
+    get_stateless_session_id,
+    set_stateless_session_id,
+)
 from utils.teams_image import get_image_data_uri
 from utils.text_util import preprocess_message
 from utils.azure_memory_store import sanitize_scope
 from azure.ai.projects.aio import AIProjectClient
-from azure.ai.projects.models import AgentDetails
-from openai import AsyncOpenAI
+from azure.ai.projects.models import AgentVersionDetails
+from openai import (
+    AsyncOpenAI,
+    NotFoundError,
+)
 from openai.types.responses import Response as OpenAIResponse
+from utils.azure_ai_foundry_agent import HostedAgentClient, ConversationBrokenError
 from openai.types.responses import (
     ResponseFunctionToolCall,
     ResponseOutputItem,
@@ -43,15 +57,17 @@ from openai.types.responses import (
 )
 from openai.types.responses.response_input_item_param import ResponseInputItemParam
 from config.tenant_config import TenantID
+from typing import cast
+from utils.background_tasks import BackgroundTaskTracker
 
 logger = logging.getLogger(__name__)
 
-# -- Polling constants for empty-response retry loop ----------------------
-POLL_MAX_RETRIES = 5
-POLL_RETRY_DELAY_SECS = 3.0
-
 COMPACT_THRESHOLD = 100000
 """Token count at which conversation history is compacted."""
+
+# -- Bot identity constants -----------------------------------------------
+BOT_SENDER_ID = "azure-sdk-qa-bot"
+BOT_SENDER_NAME = "Azure SDK Q&A Bot"
 
 _CITATION_RE = re.compile(r"[^\w\s]*cite[^\w\s]*turn\d+\S*")
 
@@ -67,44 +83,93 @@ _DAGGER_MARKER_RE = re.compile(r"\u2020\S+")
 class ChatService:
     """Coordinates conversation state, hosted-agent invocation, and response mapping."""
 
-    def __init__(self) -> None:
+    def __init__(
+        self,
+        *,
+        settings: Settings | None = None,
+        project_client: AIProjectClient | None = None,
+        openai_client: AsyncOpenAI | None = None,
+    ) -> None:
         self._conversation_service = ConversationService()
+        self._settings = settings or cfg
+        self._project_client = project_client
+        self._openai_client = openai_client
+        self._stateless_session_ids: dict[str, str] = {}
+
+    def _get_project_client(self) -> AIProjectClient:
+        return self._project_client or get_project_client()
+
+    def _get_openai_client(self, agent_name: str | None = None) -> AsyncOpenAI:
+        return self._openai_client or get_openai_client(agent_name)
+
+    def _get_stateless_session_id(self, agent_name: str) -> str | None:
+        if self._project_client is None and self._openai_client is None:
+            return get_stateless_session_id(agent_name)
+        return self._stateless_session_ids.get(agent_name)
+
+    def _set_stateless_session_id(
+        self, agent_name: str, session_id: str | None
+    ) -> None:
+        if self._project_client is None and self._openai_client is None:
+            set_stateless_session_id(agent_name, session_id)
+        elif session_id is None:
+            self._stateless_session_ids.pop(agent_name, None)
+        else:
+            self._stateless_session_ids[agent_name] = session_id
 
     async def chat(self, req: ChatRequest) -> ChatResponse:
         """Process one chat turn and return API response shape."""
-        project_client = get_project_client()
-
-        # Prompt-agent tenants are pure passthroughs: they call a Foundry prompt
-        # agent directly and skip tenant/memory system-message injection and
-        # reference enrichment (the prompt agent is fully self-contained).
+        project_client = self._get_project_client()
         tenant_config = get_tenant_config(req.tenant_id)
-        prompt_agent_name = tenant_config.prompt_agent_name if tenant_config else ""
-        is_prompt_agent = bool(prompt_agent_name)
-
-        agent = await self._get_agent(project_client, prompt_agent_name)
-        openai_client = get_openai_client()
-
-        agent_conversation_id, is_new = await self._resolve_conversation(
-            openai_client, req
+        is_prompt_agent = bool(tenant_config and tenant_config.prompt_agent_name)
+        agent_name, agent_version = self._resolve_agent_configuration(tenant_config)
+        agent = await self._get_agent(project_client, agent_name, agent_version)
+        # Portal-configured prompt agents use the project Responses endpoint,
+        # not the per-agent hosted sandbox endpoint.
+        openai_client = (
+            self._openai_client or project_client.get_openai_client()
+            if is_prompt_agent
+            else self._get_openai_client(agent_name)
         )
-        conversation_items: list[ResponseInputItemParam] = []
-        if is_new:
-            tenant_system_msg = self._build_tenant_system_message(req.tenant_id)
-            conversation_items.append(
+
+        # Stateless calls (no customer conversation_id) skip conversation
+        # threading and reuse a warm sandbox; threaded calls resolve history.
+        stateless = not req.conversation_id
+        if stateless:
+            agent_conversation_id, is_new = None, True
+            agent_session_id = (
+                None if is_prompt_agent else self._get_stateless_session_id(agent_name)
+            )
+            logger.info("Stateless request: reusing warm session=%s", agent_session_id)
+        else:
+            agent_conversation_id, is_new = await self._resolve_conversation(
+                openai_client, req
+            )
+            agent_session_id = None
+        tenant_system_item: ResponseInputItemParam | None = None
+        if not is_prompt_agent:
+            tenant_system_item = cast(
+                ResponseInputItemParam,
                 ConversationItem(
                     role=Role.System,
-                    content=tenant_system_msg,
-                ).model_dump(mode="json", exclude_none=True)
+                    content=self._build_tenant_system_message(req.tenant_id),
+                ).model_dump(mode="json", exclude_none=True),
             )
+        conversation_items: list[ResponseInputItemParam] = []
+        if is_new and tenant_system_item is not None:
+            conversation_items.append(tenant_system_item)
 
-        memory_scope = self._resolve_memory_scope(req)
+        memory_scope = None if is_prompt_agent else self._resolve_memory_scope(req)
         if memory_scope:
             memory_scope_msg = self._build_memory_scope_message(memory_scope)
             conversation_items.append(
-                ConversationItem(
-                    role=Role.System,
-                    content=memory_scope_msg,
-                ).model_dump(mode="json", exclude_none=True)
+                cast(
+                    ResponseInputItemParam,
+                    ConversationItem(
+                        role=Role.System,
+                        content=memory_scope_msg,
+                    ).model_dump(mode="json", exclude_none=True),
+                )
             )
             logger.info(
                 "Memory scope injected into conversation: scope=%s, conversation=%s",
@@ -118,35 +183,74 @@ class ChatService:
             )
 
         conversation_items.append(
-            ConversationItem(
-                role=req.message.role,
-                content=preprocess_message(req.message.content),
-            ).model_dump(mode="json", exclude_none=True)
+            cast(
+                ResponseInputItemParam,
+                ConversationItem(
+                    role=req.message.role,
+                    content=preprocess_message(req.message.content),
+                ).model_dump(mode="json", exclude_none=True),
+            )
         )
 
         # Process additional info (images, links, text) from the frontend.
-        image_items = await self._build_image_items(req.additional_infos or [])
-        conversation_items.extend(image_items)
-
-        # Streaming is broken for hosted agents — text is lost entirely.
-        # See https://github.com/Azure/azure-sdk-for-python/issues/45282
-        # and https://github.com/Azure/azure-sdk-for-python/issues/46015
-        response: OpenAIResponse = await openai_client.responses.create(
-            input=conversation_items,
-            conversation=agent_conversation_id,
-            store=True,
-            stream=False,
-            extra_body={
-                "agent_reference": {
-                    "name": agent.name,
-                    "type": AgentReferenceType.agent_reference.value,
-                }
-            },
+        additional_items = await self._build_additional_info_items(
+            req.additional_infos or []
         )
+        conversation_items.extend(additional_items)
 
-        # Poll if response completed with empty text (Foundry persistence delay).
-        if response.status == "completed" and not response.output_text:
-            response = await self._poll_response_text(openai_client, response)
+        agent_ref: dict = {
+            "name": agent.name,
+            "version": agent.version,
+            "type": AgentReferenceType.agent_reference.value,
+        }
+
+        agent_client = HostedAgentClient(openai_client)
+        try:
+            trace_id, response = await agent_client.invoke(
+                conversation_items=conversation_items,
+                agent_conversation_id=agent_conversation_id,
+                agent_session_id=agent_session_id,
+                agent_ref=agent_ref,
+            )
+        except ConversationBrokenError:
+            if not agent_conversation_id:
+                raise
+            agent_conversation_id, conversation_items = (
+                await self._rebuild_conversation_after_failure(
+                    req.conversation_id,
+                    req.conversation_type,
+                    openai_client,
+                )
+            )
+            # The replacement conversation has no tenant context of its own.
+            if tenant_system_item is not None:
+                conversation_items.insert(0, tenant_system_item)
+            # Additional infos are not persisted in Cosmos; reuse the items already built.
+            conversation_items.extend(additional_items)
+            # Replace the poisoned mapping before the single recovery attempt.
+            await self._conversation_service.save_agent_conversation_mapping(
+                req.conversation_id,
+                req.conversation_type,
+                agent_conversation_id=agent_conversation_id,
+            )
+            trace_id, response = await agent_client.invoke(
+                conversation_items=conversation_items,
+                agent_conversation_id=agent_conversation_id,
+                agent_ref=agent_ref,
+            )
+        # Cache the warm sandbox id so later stateless calls reuse it.
+        if stateless and not is_prompt_agent and not self._get_stateless_session_id(agent_name):
+            extra = getattr(response, "model_extra", None) or {}
+            captured = extra.get("agent_session_id")
+            self._set_stateless_session_id(agent_name, captured)
+            logger.info("Stateless request: captured warm session=%s", captured)
+
+        logger.info(
+            "Agent trace: trace_id=%s, response_id=%s, conversation=%s",
+            trace_id,
+            response.id,
+            agent_conversation_id,
+        )
 
         if response.status != "completed":
             logger.warning(
@@ -170,62 +274,23 @@ class ChatService:
             )
 
         chat_response = self._postprocess(req, response, agent_conversation_id)
+        chat_response.trace_id = trace_id
         if not is_prompt_agent:
-            asyncio.create_task(
-                self._save_bot_answer_to_conversation(
-                    req, response.id, chat_response.answer
+            BackgroundTaskTracker.instance().track(
+                asyncio.create_task(
+                    self._save_bot_answer_to_conversation(
+                        req, response.id, chat_response.answer, trace_id
+                    )
                 )
             )
         return chat_response
-
-    @staticmethod
-    async def _poll_response_text(
-        openai_client: AsyncOpenAI,
-        response: OpenAIResponse,
-        max_retries: int = POLL_MAX_RETRIES,
-        retry_delay: float = POLL_RETRY_DELAY_SECS,
-    ) -> OpenAIResponse:
-        """Poll ``responses.retrieve()`` until output_text appears."""
-        for attempt in range(1, max_retries + 1):
-            await asyncio.sleep(retry_delay)
-            try:
-                refreshed = await openai_client.responses.retrieve(response.id)
-                if refreshed.output_text:
-                    logger.info(
-                        "Poll retrieved text on attempt %d/%d: response=%s, "
-                        "text_len=%d",
-                        attempt,
-                        max_retries,
-                        response.id,
-                        len(refreshed.output_text),
-                    )
-                    return refreshed
-                logger.info(
-                    "Poll attempt %d/%d: still no text, response=%s",
-                    attempt,
-                    max_retries,
-                    response.id,
-                )
-            except Exception:
-                logger.warning(
-                    "Poll attempt %d/%d failed: response=%s",
-                    attempt,
-                    max_retries,
-                    response.id,
-                    exc_info=True,
-                )
-        logger.warning(
-            "Poll exhausted %d retries without text: response=%s",
-            max_retries,
-            response.id,
-        )
-        return response
 
     async def _save_bot_answer_to_conversation(
         self,
         req: ChatRequest,
         response_id: str,
         answer: str,
+        trace_id: str | None = None,
     ) -> None:
         """Persist the final bot answer so intention uses the real reply, not placeholders."""
         if not req.conversation_id or not req.conversation_type:
@@ -239,12 +304,13 @@ class ChatService:
             id=f"bot-{response_id}",
             tenant_id=req.tenant_id.value,
             sender_role=Role.System,
-            sender_id="azure-sdk-qa-bot",
-            sender_name="Azure SDK Q&A Bot",
+            sender_id=BOT_SENDER_ID,
+            sender_name=BOT_SENDER_NAME,
             content=content,
             created_at=datetime.now(timezone.utc),
             conversation_id=req.conversation_id,
             conversation_type=req.conversation_type,
+            trace_id=trace_id,
         )
 
         try:
@@ -256,27 +322,47 @@ class ChatService:
                 exc_info=True,
             )
 
+    def _resolve_agent_configuration(
+        self,
+        tenant_config: TenantConfig | None,
+    ) -> tuple[str, str | None]:
+        """Resolve the hosted agent assigned to a tenant."""
+        if tenant_config is not None:
+            if tenant_config.prompt_agent_name:
+                return tenant_config.prompt_agent_name, None
+            agent_config = tenant_config.agent
+            return (
+                self._settings(agent_config.name_config_key, agent_config.name),
+                self._settings(agent_config.version_config_key),
+            )
+        return (
+            self._settings("AI_FOUNDRY_AGENT_NAME", "azure-sdk-chat-agent"),
+            self._settings("AI_FOUNDRY_AGENT_VERSION"),
+        )
+
     async def _get_agent(
         self,
         project_client: AIProjectClient,
-        agent_name_override: str = "",
-    ) -> AgentDetails:
-        """Load hosted-agent definition from Foundry.
-
-        If ``agent_name_override`` is provided (e.g. a tenant-configured prompt
-        agent name), that agent is resolved instead of the default hosted chat
-        agent.
-        """
-        agent_name = agent_name_override or cfg(
-            "AI_FOUNDRY_AGENT_NAME", "azure-sdk-qa-bot-chat-agent"
-        )
-        agent = await project_client.agents.get(agent_name)
+        agent_name: str,
+        agent_version: str | None,
+    ) -> AgentVersionDetails:
+        """Load hosted-agent version definition from Foundry."""
+        if agent_version:
+            agent = await project_client.agents.get_version(agent_name, agent_version)
+        else:
+            agent_details = await project_client.agents.get(agent_name)
+            agent = agent_details.versions.latest if agent_details else None
         if agent is None:
             raise RuntimeError(
-                f"Agent '{agent_name}' not found in AI Foundry. "
+                f"Agent '{agent_name}' (version={agent_version or 'latest'}) not found in AI Foundry. "
                 "Make sure the agent has been deployed."
             )
-        logger.info("Using agent: name=%s, versions=%s", agent.name, agent.versions)
+        logger.info(
+            "Using agent: name=%s, version=%s, status=%s",
+            agent.name,
+            agent.version,
+            getattr(agent, "status", None),
+        )
         return agent
 
     async def _resolve_conversation(
@@ -294,7 +380,7 @@ class ChatService:
             try:
                 await openai_client.conversations.retrieve(stored_conversation_id)
                 return stored_conversation_id, False
-            except Exception:
+            except NotFoundError:
                 logger.info(
                     "Stored conversation %s no longer exists, creating new one",
                     stored_conversation_id,
@@ -312,49 +398,147 @@ class ChatService:
         logger.info("Created new AI Foundry conversation: %s", new_id)
         return new_id, True
 
-    @staticmethod
-    async def _build_image_items(
+    async def _rebuild_conversation_after_failure(
+        self,
+        conversation_id: str | None,
+        conversation_type: ConversationType | None,
+        openai_client: AsyncOpenAI,
+    ) -> tuple[str, list[ResponseInputItemParam]]:
+        """Replace corrupted history and replay only safe message items."""
+        replay_items = await self._list_message_items(
+            conversation_id,
+            conversation_type,
+        )
+
+        replacement = await openai_client.conversations.create()
+        replacement_id = replacement.id
+
+        logger.info(
+            "Created replacement Foundry conversation %s: replay_messages=%d",
+            replacement_id,
+            len(replay_items),
+        )
+        return replacement_id, replay_items
+
+    async def _list_message_items(
+        self,
+        conversation_id: str | None,
+        conversation_type: ConversationType | None,
+    ) -> list[ResponseInputItemParam]:
+        """Read replayable conversation messages from Cosmos in chronological order."""
+        replay: list[ResponseInputItemParam] = []
+        if not conversation_id or not conversation_type:
+            return replay
+        try:
+            messages = await self._conversation_service.get_messages_by_conversation_id(
+                conversation_id,
+                conversation_type,
+            )
+            for message in messages:
+                if message.sender_role == Role.User:
+                    role = Role.User
+                elif message.sender_role in (Role.System, Role.Assistant):
+                    role = Role.Assistant
+                else:
+                    continue
+
+                replay.append(
+                    cast(
+                        ResponseInputItemParam,
+                        ConversationItem(
+                            role=role,
+                            content=message.content,
+                        ).model_dump(mode="json", exclude_none=True),
+                    )
+                )
+        except Exception:
+            logger.warning(
+                "Failed to read messages from Cosmos conversation %s; "
+                "continuing with fresh history",
+                conversation_id,
+                exc_info=True,
+            )
+        return replay
+
+    async def _build_additional_info_items(
+        self,
         infos: list[AdditionalInfo],
     ) -> list[ResponseInputItemParam]:
-        """Convert image additional_infos into Responses API input items."""
+        """Convert additional_infos into Responses API input items.
+
+        Handles both text and image types:
+        - **Text**: injected as a user message so the LLM sees project context
+          (e.g. TypeSpec project state, intake analysis, .tsp code snippets).
+        - **Image**: fetched and converted to data-URI input_image items.
+        """
         items: list[ResponseInputItemParam] = []
         for info in infos:
-            if info.type != AdditionalInfoType.Image or not info.link:
-                continue
-            try:
-                data_uri = await get_image_data_uri(info.link)
-            except Exception:
-                logger.warning(
-                    "Failed to fetch Teams image: %s", info.link, exc_info=True
+            if info.type == AdditionalInfoType.Text and info.content:
+                content = info.content
+                max_chars = int(self._settings("AOAI_CHAT_MAX_TOKENS", "100000") or "100000")
+                if len(content) > max_chars:
+                    logger.warning(
+                        "Text additional_info is large (%d chars, limit %d)",
+                        len(content),
+                        max_chars,
+                    )
+                items.append(
+                    cast(
+                        ResponseInputItemParam,
+                        ConversationItem(
+                            role=Role.User,
+                            content=info.content,
+                        ).model_dump(mode="json", exclude_none=True),
+                    )
                 )
-                continue
-            items.append(
-                {
-                    "type": "message",
-                    "role": "user",
-                    "content": [
-                        {
-                            "type": "input_image",
-                            "image_url": data_uri,
-                            "detail": "auto",
-                        },
-                    ],
-                }
-            )
+            elif info.type == AdditionalInfoType.Image and info.link:
+                try:
+                    data_uri = await get_image_data_uri(info.link)
+                except Exception:
+                    logger.warning(
+                        "Failed to fetch Teams image: %s",
+                        info.link,
+                        exc_info=True,
+                    )
+                    continue
+                items.append(
+                    {
+                        "type": "message",
+                        "role": "user",
+                        "content": [
+                            {
+                                "type": "input_image",
+                                "image_url": data_uri,
+                                "detail": "auto",
+                            },
+                        ],
+                    }
+                )
         return items
 
     def _build_tenant_system_message(self, tenant_id: TenantID) -> str:
-        """Inject tenant context so the agent knows the current domain."""
+        """Inject tenant context + the default skill so the agent can route itself."""
         parts: list[str] = [f"[tenant_context] original_tenant_id={tenant_id.value}"]
 
         scope_desc = get_tenant_scope_description(tenant_id)
         if scope_desc:
             parts.append(f"\n[tenant_scope]\n{scope_desc}")
 
+        skill_name = get_skill_name_for_tenant(tenant_id)
+        skill_content = build_skill_content(tenant_id) if skill_name else ""
+        if skill_content:
+            parts.append(
+                f"\n[skill] name={skill_name} "
+                f"{skill_content}"
+            )
+
         return "\n".join(parts)
 
     def _resolve_memory_scope(self, req: ChatRequest) -> str | None:
-        """Derive user memory scope from user_id. Returns None if no user_id."""
+        """Derive user memory scope from user_id. Returns None if disabled or no user_id."""
+        if (self._settings("ENABLE_USER_MEMORY_SEARCH", "true") or "true").lower() != "true":
+            logger.info("User memory search disabled by config")
+            return None
         user_id = getattr(req.message, "user_id", None)
         if user_id and user_id.strip():
             scope = sanitize_scope(f"user_{user_id.strip()}")
@@ -371,7 +555,7 @@ class ChatService:
         self,
         req: ChatRequest,
         response: OpenAIResponse,
-        agent_conversation_id: str,
+        agent_conversation_id: str | None,
     ) -> ChatResponse:
         """Map hosted-agent response to `ChatResponse`.
 
@@ -380,22 +564,9 @@ class ChatService:
         as-is (with citation artifacts stripped for safety).
         """
 
-        tool_results = self._extract_tool_results(response.output)
-        search = tool_results.get("search_knowledge_base")
-        tool_references = search.results if search else []
-        tenant = self._extract_routed_tenant(response.output)
-
+        tenant_config = get_tenant_config(req.tenant_id)
+        is_prompt_agent = bool(tenant_config and tenant_config.prompt_agent_name)
         output_text = response.output_text or ""
-        if not output_text:
-            output_text = (
-                "Sorry, something went wrong and I couldn't generate a response. "
-                "Please send your message again to retry."
-            )
-            logger.error(
-                "Empty output_text for response %s (status=%s), returning error message",
-                response.id,
-                response.status,
-            )
 
         # Strip model citation artifacts (e.g. "citeturn0search0",
         # "【25:1†source】", dangling "†source" fragments).
@@ -403,22 +574,42 @@ class ChatService:
         output_text = _SOURCE_MARKER_RE.sub("", output_text)
         output_text = _DAGGER_MARKER_RE.sub("", output_text)
 
+        if is_prompt_agent:
+            return ChatResponse(
+                id=response.id,
+                answer=output_text,
+                has_result=bool(output_text.strip()),
+                agent_conversation_id=agent_conversation_id,
+            )
+
+        tool_results = self._extract_tool_results(response.output)
+        search = tool_results.get("search_knowledge_base")
+        tool_references = (
+            search.results if isinstance(search, SearchKnowledgeBaseResult) else []
+        )
+        tenant = self._extract_routed_tenant(response.output)
+
         # Extract structured references from the agent's markdown output
         # and strip the references section from the answer text.
         answer, references = self._extract_references_from_text(
             output_text, tool_references
         )
 
-        # Build full_context from search tool results when requested
+        # Build full_context from search tool results when requested.
+        # Keys use "document_" prefix for compatibility with the eval pipeline.
         full_context = None
         if req.with_full_context and tool_references:
             full_context = json.dumps(
-                [r.model_dump(mode="json") for r in tool_references]
+                [
+                    DocumentContext.from_reference(r).model_dump(mode="json")
+                    for r in tool_references
+                ]
             )
 
         resp = ChatResponse(
             id=response.id,
             answer=answer,
+            has_result=bool(answer.strip()),
             references=references if references else None,
             full_context=full_context,
             agent_conversation_id=agent_conversation_id,
@@ -556,9 +747,10 @@ class ChatService:
         for item in items:
             if not isinstance(item, ResponseOutputMessage):
                 continue
-            call_id = item.model_extra.get("call_id", None)
-            output = item.model_extra.get("output", None)
-            tool_name = call_id_to_name.get(call_id, "")
+            extras = item.model_extra or {}
+            call_id = extras.get("call_id") or ""
+            output = extras.get("output", None)
+            tool_name = call_id_to_name.get(call_id, "") if call_id else ""
             if not tool_name or not output:
                 continue
 

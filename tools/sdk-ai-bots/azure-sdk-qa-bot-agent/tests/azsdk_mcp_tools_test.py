@@ -28,22 +28,22 @@ from dotenv import load_dotenv
 load_dotenv()
 
 from agent_framework import Agent
-from agent_framework_azure_ai import AzureAIClient
-from azure.identity.aio import DefaultAzureCredential
+from agent_framework.foundry import FoundryChatClient
 
 import config.app_config as app_config
 from config.app_config import get as cfg
 from tools.azsdk_mcp_tools import create_azsdk_mcp_tool
+from utils.azure_credential import get_credential
 
 
 @pytest_asyncio.fixture(scope="module")
 async def ai_client():
-    """Initialise App Configuration and return an AzureAIClient."""
+    """Initialise App Configuration and return a FoundryChatClient."""
     await app_config.init()
-    return AzureAIClient(
+    return FoundryChatClient(
         project_endpoint=cfg("AI_FOUNDRY_PROJECT_ENDPOINT"),
-        model_deployment_name=cfg("AI_FOUNDRY_AGENT_COMPLETION_MODEL"),
-        credential=DefaultAzureCredential(),
+        model=cfg("AI_FOUNDRY_AGENT_COMPLETION_MODEL"),
+        credential=get_credential(),
     )
 
 
@@ -52,6 +52,26 @@ async def azsdk_mcp_tool():
     """Create the AZSDK MCP tool (requires App Configuration to be loaded)."""
     await app_config.init()
     return await create_azsdk_mcp_tool()
+
+
+@pytest.mark.asyncio
+async def test_azsdk_mcp_exposes_allowed_tools() -> None:
+    await app_config.init()
+    tool = await create_azsdk_mcp_tool()
+    async with tool:
+        names = {f.name for f in tool.functions}
+    assert names == set(tool.allowed_tools)
+
+
+@pytest.mark.asyncio
+async def test_azsdk_get_release_plan_receives_work_item_id() -> None:
+    await app_config.init()
+    tool = await create_azsdk_mcp_tool()
+    async with tool:
+        # Work item 1 never exists, so the error proves the ID reached the server.
+        result = await tool.call_tool("azsdk_get_release_plan", workItemId=1)
+    text = result if isinstance(result, str) else " ".join(getattr(c, "text", None) or "" for c in result)
+    assert "Work item 1" in text, text
 
 
 @pytest.mark.asyncio

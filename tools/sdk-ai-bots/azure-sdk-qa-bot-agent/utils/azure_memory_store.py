@@ -39,9 +39,8 @@ def get_memory_update_delay() -> int:
 
     Local env var overrides App Config for flexibility during development.
     """
-    return int(
-        os.environ.get("MEMORY_UPDATE_DELAY") or cfg("MEMORY_UPDATE_DELAY", "300")
-    )
+    env_value = os.environ.get("MEMORY_UPDATE_DELAY")
+    return int(env_value) if env_value else int(cfg("MEMORY_UPDATE_DELAY", "300"))
 
 
 def sanitize_scope(raw: str) -> str:
@@ -73,7 +72,7 @@ async def _ensure_memory_store(
     description: str,
 ) -> str:
     """Create a memory store if it doesn't already exist. Returns the name."""
-    chat_model = cfg("AOAI_CHAT_REASONING_MODEL", "gpt-5.4")
+    chat_model = cfg("MEMORY_STORE_REASONING_MODEL", "gpt-5.4")
     embedding_model = cfg("MEMORY_STORE_EMBEDDING_MODEL", "text-embedding-ada-002")
 
     try:

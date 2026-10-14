@@ -26,7 +26,7 @@ import re
 from typing import Any
 
 from agent_framework import Message
-from agent_framework._sessions import BaseContextProvider
+from agent_framework._sessions import ContextProvider
 from azure.ai.projects.aio import AIProjectClient
 from azure.ai.projects.models import MemorySearchOptions
 
@@ -49,7 +49,7 @@ _TENANT_CONTEXT_RE = re.compile(
 )
 
 
-class MemoryContextProvider(BaseContextProvider):
+class MemoryContextProvider(ContextProvider):
     """Agent context provider that owns memory retrieval and memory updates."""
 
     def __init__(
@@ -74,9 +74,9 @@ class MemoryContextProvider(BaseContextProvider):
         )
 
         # Episode search config
-        self._episode_top_k = int(cfg("MEMORY_EPISODE_SEARCH_TOP_K", "3"))
+        self._episode_top_k = int(cfg("MEMORY_EPISODE_SEARCH_TOP_K", "2"))
         self._episode_similarity_threshold = float(
-            cfg("MEMORY_EPISODE_SIMILARITY_THRESHOLD", "0.5")
+            cfg("MEMORY_EPISODE_SIMILARITY_THRESHOLD", "0.8")
         )
         self._episode_embedding_model = cfg(
             "MEMORY_STORE_EMBEDDING_MODEL", "text-embedding-3-small"
@@ -572,17 +572,11 @@ class MemoryContextProvider(BaseContextProvider):
             lines.append(f"\n### Episode {i}")
             lines.append(f"**Trigger:** {ep.get('trigger', 'N/A')}")
 
-            symptoms = ep.get("symptoms", [])
-            if symptoms:
-                lines.append("**Symptoms:**")
-                for s in symptoms:
-                    lines.append(f"  - {s}")
-
+            # Include reasoning chain as a condensed single line to preserve
+            # diagnostic value without excessive token cost
             chain = ep.get("reasoning_chain", [])
             if chain:
-                lines.append("**Reasoning chain:**")
-                for step_idx, step in enumerate(chain, 1):
-                    lines.append(f"  {step_idx}. {step}")
+                lines.append(f"**Reasoning:** {' → '.join(chain)}")
 
             lines.append(f"**Resolution:** {ep.get('resolution', 'N/A')}")
             lines.append(f"**Key insight:** {ep.get('key_insight', 'N/A')}")

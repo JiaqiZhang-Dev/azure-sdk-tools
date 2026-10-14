@@ -1,7 +1,7 @@
 using Azure.Sdk.Tools.Cli.CopilotAgents;
 using Azure.Sdk.Tools.Cli.Helpers;
 using Azure.Sdk.Tools.Cli.Tests.TestHelpers;
-using GitHub.Copilot.SDK;
+using GitHub.Copilot;
 using Microsoft.Extensions.AI;
 using Microsoft.Extensions.Logging;
 using Moq;
@@ -17,7 +17,7 @@ internal class CopilotAgentRunnerTests
     private TokenUsageHelper tokenUsageHelper;
     private Mock<ICopilotClientWrapper> clientMock;
     private Mock<ICopilotSessionWrapper> sessionMock;
-    private List<SessionEventHandler> eventHandlers;
+    private List<Action<SessionEvent>> eventHandlers;
     private ICollection<AIFunction>? capturedTools;
 
     [SetUp]
@@ -28,11 +28,11 @@ internal class CopilotAgentRunnerTests
 
         eventHandlers = [];
         capturedTools = null;
-        
+
         // Setup session mock
         sessionMock = new Mock<ICopilotSessionWrapper>();
-        sessionMock.Setup(s => s.On(It.IsAny<SessionEventHandler>()))
-            .Callback<SessionEventHandler>(handler => eventHandlers.Add(handler))
+        sessionMock.Setup(s => s.On(It.IsAny<Action<SessionEvent>>()))
+            .Callback<Action<SessionEvent>>(handler => eventHandlers.Add(handler))
             .Returns(() => Mock.Of<IDisposable>());
         sessionMock.Setup(s => s.DisposeAsync())
             .Returns(ValueTask.CompletedTask);
@@ -46,7 +46,7 @@ internal class CopilotAgentRunnerTests
                 It.IsAny<CancellationToken>()))
             .Callback<SessionConfig?, CancellationToken>((config, ct) =>
             {
-                capturedTools = config?.Tools;
+                capturedTools = config?.Tools?.OfType<AIFunction>().ToList();
             })
             .ReturnsAsync(sessionMock.Object);
     }
@@ -103,7 +103,7 @@ internal class CopilotAgentRunnerTests
     public async Task RunAsync_WithExitTool_ReturnsResult()
     {
         const string expectedResult = "Success";
-        
+
         sessionMock.Setup(s => s.SendAsync(It.IsAny<MessageOptions>(), It.IsAny<CancellationToken>()))
             .Callback(() =>
             {
@@ -248,6 +248,75 @@ internal class CopilotAgentRunnerTests
         Assert.That(ex.Message, Does.Contain("3 iterations"));
     }
 
+    [TestCase(false)]
+    [TestCase(true)]
+    public async Task RunAsync_AwaitsValidationAndRetainsOneSessionForSuccessiveDiagnostics(bool omitFirstExit)
+    {
+        var prompts = new List<string>();
+        var validations = 0;
+        var firstValidation = new TaskCompletionSource<CopilotAgentValidationResult>(TaskCreationOptions.RunContinuationsAsynchronously);
+        var validationStarted = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+        sessionMock.Setup(s => s.SendAsync(It.IsAny<MessageOptions>(), It.IsAny<CancellationToken>()))
+            .Callback<MessageOptions, CancellationToken>((options, _) =>
+            {
+                prompts.Add(options.Prompt!);
+                if (omitFirstExit && prompts.Count == 1)
+                {
+                    SimulateSessionIdle();
+                }
+                else
+                {
+                    SimulateExitToolCall("Everything is fixed.");
+                }
+            })
+            .ReturnsAsync("message-id");
+        var runner = new CopilotAgentRunner(clientMock.Object, tokenUsageHelper, loggerMock.Object);
+        var agent = new CopilotAgent<string>
+        {
+            Instructions = "Apply compiler-guided patches.",
+            MaxIterations = 4,
+            ValidateResult = _ =>
+            {
+                validations++;
+                if (validations == 1)
+                {
+                    validationStarted.SetResult();
+                    return firstValidation.Task;
+                }
+                return Task.FromResult(new CopilotAgentValidationResult
+                {
+                    Success = validations == 3,
+                    Reason = "Second awaited build: missing member Beta."
+                });
+            }
+        };
+
+        var run = runner.RunAsync(agent);
+        try
+        {
+            await validationStarted.Task.WaitAsync(TimeSpan.FromSeconds(5));
+            Assert.That(run.IsCompleted, Is.False, "An Exit success claim must not bypass awaited host validation.");
+            Assert.That(prompts, Has.Count.EqualTo(omitFirstExit ? 2 : 1));
+        }
+        finally
+        {
+            firstValidation.TrySetResult(new CopilotAgentValidationResult
+            {
+                Success = false,
+                Reason = "First awaited build: missing member Alpha."
+            });
+        }
+        var result = await run.WaitAsync(TimeSpan.FromSeconds(5));
+
+        Assert.That(result, Is.EqualTo("Everything is fixed."));
+        Assert.That(validations, Is.EqualTo(3), "A missing Exit consumes an iteration, not a host validation.");
+        Assert.That(prompts, Has.Count.EqualTo(omitFirstExit ? 4 : 3));
+        Assert.That(prompts[^2], Does.Contain("First awaited build: missing member Alpha."));
+        Assert.That(prompts[^1], Does.Contain("Second awaited build: missing member Beta."));
+        clientMock.Verify(c => c.CreateSessionAsync(It.IsAny<SessionConfig>(), It.IsAny<CancellationToken>()), Times.Once);
+        sessionMock.Verify(s => s.DisposeAsync(), Times.Once);
+    }
+
     [Test]
     public void RunAsync_SessionError_ThrowsException()
     {
@@ -354,7 +423,7 @@ internal class CopilotAgentRunnerTests
     {
         // SendAsync respects cancellation token
         using var cts = new CancellationTokenSource();
-        
+
         sessionMock.Setup(s => s.SendAsync(It.IsAny<MessageOptions>(), It.IsAny<CancellationToken>()))
             .Returns<MessageOptions, CancellationToken>((options, ct) =>
             {
@@ -479,14 +548,14 @@ internal class CopilotAgentRunnerTests
     public async Task RunAsync_SessionConfigured_WithCorrectModelAndInstructions()
     {
         SessionConfig? capturedConfig = null;
-        
+
         clientMock.Setup(c => c.CreateSessionAsync(
                 It.IsAny<SessionConfig>(),
                 It.IsAny<CancellationToken>()))
             .Callback<SessionConfig?, CancellationToken>((config, ct) =>
             {
                 capturedConfig = config;
-                capturedTools = config?.Tools;
+                capturedTools = config?.Tools?.OfType<AIFunction>().ToList();
             })
             .ReturnsAsync(sessionMock.Object);
 
@@ -518,6 +587,30 @@ internal class CopilotAgentRunnerTests
             Assert.That(capturedConfig.SystemMessage?.Mode, Is.EqualTo(SystemMessageMode.Append));
         });
 
+    }
+
+    [Test]
+    public async Task RunAsync_WithoutModel_LetsCopilotSelectDefault()
+    {
+        SessionConfig? capturedConfig = null;
+        clientMock.Setup(c => c.CreateSessionAsync(
+                It.IsAny<SessionConfig>(),
+                It.IsAny<CancellationToken>()))
+            .Callback<SessionConfig?, CancellationToken>((config, _) =>
+            {
+                capturedConfig = config;
+                capturedTools = config?.Tools?.OfType<AIFunction>().ToList();
+            })
+            .ReturnsAsync(sessionMock.Object);
+        sessionMock.Setup(s => s.SendAsync(It.IsAny<MessageOptions>(), It.IsAny<CancellationToken>()))
+            .Callback(() => SimulateExitToolCall("Success"))
+            .ReturnsAsync("msg-id");
+
+        var runner = new CopilotAgentRunner(clientMock.Object, tokenUsageHelper, loggerMock.Object);
+
+        await runner.RunAsync(new CopilotAgent<string> { Instructions = "Test" });
+
+        Assert.That(capturedConfig?.Model, Is.Null);
     }
 
     [Test]
@@ -571,10 +664,8 @@ internal class CopilotAgentRunnerTests
         // Arrange - Use a fake CLI path that doesn't exist
         var copilotClient = new CopilotClient(new CopilotClientOptions
         {
-            UseStdio = true,
-            AutoStart = true,
+            Connection = RuntimeConnection.ForStdio("/nonexistent/path/to/copilot-cli"),
             UseLoggedInUser = false,
-            CliPath = "/nonexistent/path/to/copilot-cli"
         });
         var copilotClientWrapper = new CopilotClientWrapper(copilotClient);
         var localTokenUsageHelper = new TokenUsageHelper(Mock.Of<IRawOutputHelper>());
@@ -590,7 +681,7 @@ internal class CopilotAgentRunnerTests
         };
 
         // Act & Assert
-        var ex = Assert.ThrowsAsync<InvalidOperationException>(async () =>
+        var ex = Assert.ThrowsAsync<CopilotCliUnavailableException>(async () =>
             await runner.RunAsync(agent));
 
         Assert.Multiple(() =>
@@ -608,8 +699,7 @@ internal class CopilotAgentRunnerTests
         // Arrange - Use an invalid GitHub token
         var copilotClient = new CopilotClient(new CopilotClientOptions
         {
-            UseStdio = true,
-            AutoStart = true,
+            Connection = RuntimeConnection.ForStdio(),
             UseLoggedInUser = false,
             GitHubToken = "invalid_token_that_will_not_work"
         });
@@ -627,7 +717,7 @@ internal class CopilotAgentRunnerTests
         };
 
         // Act & Assert
-        var ex = Assert.ThrowsAsync<InvalidOperationException>(async () =>
+        var ex = Assert.ThrowsAsync<CopilotCliUnavailableException>(async () =>
             await runner.RunAsync(agent));
 
         Assert.That(ex!.Message, Does.Contain("not authenticated").Or.Contain("could not be found"));
@@ -655,7 +745,7 @@ internal class CopilotAgentRunnerTests
         };
 
         // Act & Assert
-        var ex = Assert.ThrowsAsync<InvalidOperationException>(async () =>
+        var ex = Assert.ThrowsAsync<CopilotCliUnavailableException>(async () =>
             await runner.RunAsync(agent));
 
         Assert.Multiple(() =>
@@ -689,7 +779,7 @@ internal class CopilotAgentRunnerTests
         };
 
         // Act & Assert
-        var ex = Assert.ThrowsAsync<InvalidOperationException>(async () =>
+        var ex = Assert.ThrowsAsync<CopilotCliUnavailableException>(async () =>
             await runner.RunAsync(agent));
 
         Assert.Multiple(() =>

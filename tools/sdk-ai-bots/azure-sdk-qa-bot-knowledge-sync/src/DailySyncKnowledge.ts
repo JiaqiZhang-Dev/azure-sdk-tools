@@ -1,12 +1,17 @@
-import { execSync } from 'child_process';
+import * as os from 'os';
 import * as fs from 'fs';
 import * as path from 'path';
+import { execSync } from 'child_process';
+import { AzureCliCredential, ChainedTokenCredential, ManagedIdentityCredential } from '@azure/identity';
 import { BlobService } from './services/StorageService';
 import { SpectorCaseProcessor } from './services/SpectorCaseProcessor';
-import { ConfigurationLoader, RepositoryConfig, DocumentationSource, Metadata } from './services/ConfigurationLoader';
+import { ConfigurationLoader, DocumentationSource, Metadata, RepositoryConfig } from './services/ConfigurationLoader';
 import { SearchService } from './services/SearchService';
 import { MetadataResolver } from './services/MetadataResolver';
 import { TypeSpecProcessor } from './services/TypeSpecProcessor';
+import { SampleProcessor } from './services/SampleProcessor';
+import { AlloySampleProcessor } from './services/AlloySampleProcessor';
+import { getGitHubEnvironment } from './services/GitHubAuthentication';
 
 /**
  * Daily sync knowledge function that processes documentation from various repositories
@@ -46,24 +51,19 @@ interface ProcessSourceDirectoryResult {
  * Core processing logic for daily sync knowledge
  */
 export async function processDailySyncKnowledge(): Promise<void> {
-    const workingDir = '/tmp/daily-sync-work';
+    const workingDir = fs.mkdtempSync(path.join(os.tmpdir(), 'knowledge-sync-'));
     const docsDir = path.join(workingDir, 'docs');
     const tempDocsDir = path.join(workingDir, 'temp_docs');
     
     // Initialize services
-    const blobService = new BlobService();
-    const searchService = new SearchService();
-    
     try {
+        const blobService = new BlobService();
+        const searchService = new SearchService();
         // Load configuration
         console.log('Loading knowledge configuration...');
         const documentationSources = ConfigurationLoader.getDocumentationSources();
         
         // Create working directories
-        if (fs.existsSync(workingDir)) {
-            fs.rmSync(workingDir, { recursive: true, force: true });
-        }
-        fs.mkdirSync(workingDir, { recursive: true });
         fs.mkdirSync(docsDir, { recursive: true });
 
         console.log('Setting up documentation repositories...');
@@ -78,6 +78,12 @@ export async function processDailySyncKnowledge(): Promise<void> {
 
         console.log(`processing typespec-azure-resource-manager library`);
         processTypeSpec(docsDir, "typespec-azure/packages/typespec-azure-resource-manager/lib");
+
+        console.log(`processing typespec-azure samples`);
+        processSamples(docsDir, "typespec-azure/packages/samples/specs");
+
+        console.log(`processing alloy framework samples`);
+        processAlloySamples(docsDir, "alloy/samples");
 
         console.log('Processing documentation sources...');
         
@@ -146,6 +152,10 @@ export async function processDailySyncKnowledge(): Promise<void> {
         
         // Clean up expired blobs
         await cleanupExpiredBlobs(allChangedFiles.concat(allUnchangedFiles).concat(allMetadataChangedFiles));
+
+        // Trigger AI Search to reindex the knowledge base so the updated blobs are picked up
+        await searchService.runIndexer();
+
         console.log('Daily sync knowledge processing completed');
 
     } finally {
@@ -180,22 +190,14 @@ function getAuthenticatedUrl(repo: RepositoryConfig): string {
     }
     
     if (repo.authType === 'token') {
-        if (!repo.token) {
-            console.error(`Token is missing for repository ${repo.name}. Please check environment variable.`);
-            throw new Error(`Authentication token missing for ${repo.name}`);
-        }
         console.log(`Using token authentication for ${repo.name}`);
-        return repo.url.replace('https://', `https://${repo.token}@`);
+        return repo.url;
     }
     
     if (repo.authType === 'ssh') {
         // SSH URLs should be used as-is, assuming SSH keys are configured
         console.log(`Using SSH authentication for ${repo.name} with host ${repo.sshHost || 'default'}`);
         return repo.url;
-    }
-
-    if (repo.authType === 'local') {
-        repo.url = repo.localPath;
     }
     
     return repo.url;
@@ -204,7 +206,7 @@ function getAuthenticatedUrl(repo: RepositoryConfig): string {
 /**
  * Setup SSH configuration for git operations (Windows and Linux compatible)
  */
-async function setupSSHConfig(): Promise<void> {
+async function setupSSHConfig(sshDir: string): Promise<void> {
     const sshPrivateKey = process.env.SSH_PRIVATE_KEY;
     
     if (!sshPrivateKey) {
@@ -213,11 +215,6 @@ async function setupSSHConfig(): Promise<void> {
     }
     
     try {
-        // Determine home directory based on platform
-        const homeDir = process.env.HOME;
-        
-        const sshDir = path.join(homeDir, '.ssh');
-        
         // Create .ssh directory if it doesn't exist
         if (!fs.existsSync(sshDir)) {
             fs.mkdirSync(sshDir, { recursive: true });
@@ -299,7 +296,7 @@ async function setupDocumentationRepositories(docsDir: string): Promise<void> {
     }
     
     // Setup SSH configuration first
-    await setupSSHConfig();
+    await setupSSHConfig(path.join(path.dirname(docsDir), '.ssh'));
     
     // Load repository configurations from the config file
     const repositories = ConfigurationLoader.getRepositoryConfigs();
@@ -311,43 +308,50 @@ async function setupDocumentationRepositories(docsDir: string): Promise<void> {
             
             // Get authenticated URL if required
             const cloneUrl = getAuthenticatedUrl(repo);
+            let env = process.env;
+            if (repo.authType === 'token') {
+                env = await getGitHubEnvironment(repo.url, repo.token);
+            }
+            if (repo.authType === 'azure-devops') {
+                const scope = process.env.ADO_RESOURCE_SCOPE;
+                if (!scope) throw new Error('ADO_RESOURCE_SCOPE is required for Azure DevOps checkout');
+                const credential = new ChainedTokenCredential(
+                    new ManagedIdentityCredential({ clientId: process.env.AZURE_CLIENT_ID }),
+                    new AzureCliCredential()
+                );
+                const token = await credential.getToken(scope);
+                if (!token) throw new Error('No Azure DevOps access token');
+                // Keep the bearer out of command strings, URLs, and persisted Git configuration.
+                env = {
+                    ...process.env,
+                    GIT_CONFIG_COUNT: '1',
+                    GIT_CONFIG_KEY_0: `http.${repo.url}.extraheader`,
+                    GIT_CONFIG_VALUE_0: `Authorization: Bearer ${token.token}`
+                };
+            }
 
-            if (repo.authType === 'local') {
-                // Copy from cloneUrl (local path)
-                for (const folder of repo.sparseCheckout || []) {
-                    const srcPath = path.join(cloneUrl, folder);
-                    const destPath = path.join(repoPath, folder);
-                    
-                    // Ensure parent directory exists
-                    const parentDir = path.dirname(destPath);
-                    if (!fs.existsSync(parentDir)) {
-                        fs.mkdirSync(parentDir, { recursive: true });
-                    }
-                    
-                    fs.cpSync(srcPath, destPath, { recursive: true });
-                }
-            } else {
-                // Clone from remote URL
-                process.chdir(docsDir);
+            // Clone from remote URL
+            process.chdir(docsDir);
+
+            if (repo.sparseCheckout) {
+                // Use sparse checkout for large repositories
+                execSync(`git clone --filter=blob:none --sparse ${cloneUrl} ${repo.path}`, { stdio: 'pipe', env });
+                process.chdir(repoPath);
+                execSync('git config core.sparseCheckout true', { stdio: 'pipe', env });
                 
-                if (repo.sparseCheckout) {
-                    // Use sparse checkout for large repositories
-                    execSync(`git clone --filter=blob:none --sparse ${cloneUrl} ${repo.path}`, { stdio: 'pipe', env: process.env });
-                    process.chdir(repoPath);
-                    execSync('git config core.sparseCheckout true', { stdio: 'pipe', env: process.env });
-                    
-                    const sparseCheckoutFile = path.join(repoPath, '.git/info/sparse-checkout');
-                    fs.writeFileSync(sparseCheckoutFile, repo.sparseCheckout.join('\n'));
+                const sparseCheckoutFile = path.join(repoPath, '.git/info/sparse-checkout');
+                fs.writeFileSync(sparseCheckoutFile, repo.sparseCheckout.join('\n'));
 
-                    execSync(`git checkout ${repo.branch}`, { stdio: 'pipe', env: process.env });
-                } else {
-                    execSync(`git clone ${cloneUrl} ${repo.path}`, { stdio: 'pipe', env: process.env });
-                }
+                execSync(`git checkout ${repo.branch}`, { stdio: 'pipe', env });
+            } else {
+                execSync(`git clone ${cloneUrl} ${repo.path}`, { stdio: 'pipe', env });
             }
             console.log(`${repo.name} setup completed`);
-        } catch (error) {
-            console.error(`Error setting up ${repo.name}:`, error);
-            throw error;
+        } catch {
+            // Raw subprocess errors can contain credentials from the child environment.
+            const setupError = new Error(`Repository setup failed: ${repo.name}`);
+            console.error(setupError.message);
+            throw setupError;
         }
     }
 }
@@ -447,8 +451,8 @@ async function processSourceDirectory(
                     }
                 }
 
-                // Skip reference files and release notes
-                if (relativePath.startsWith('reference') || entry.name.startsWith('release-')) {
+                // Skip reference files and dated release notes (release-YYYY-MM-DD)
+                if (relativePath.startsWith('reference') || /^release-\d{4}-\d{2}-\d{2}\.(md|mdx)$/.test(entry.name)) {
                     continue;
                 }
                 
@@ -877,6 +881,17 @@ async function preprocessSpectorCases(docsDir: string): Promise<void> {
 }
 
 /**
+ * Process TypeSpec samples into generated markdown
+ */
+function processSamples(docsDir: string, relativeSamplesDir: string) : void {
+    try {
+        new SampleProcessor(docsDir, relativeSamplesDir).processSamples();
+    } catch (error) {
+        console.error(`Error processing typespec samples: ${relativeSamplesDir}`, error);
+    }
+}
+
+/**
  * Process TypeSpec library
  */
 function processTypeSpec(docsDir: string, relativeLibDir: string) : void {
@@ -884,5 +899,16 @@ function processTypeSpec(docsDir: string, relativeLibDir: string) : void {
         new TypeSpecProcessor(docsDir, relativeLibDir).processTypeSpecLibraries();
     } catch (error) {
         console.error(`Error processing typespec library: ${relativeLibDir}`, error);
+    }
+}
+
+/**
+ * Process Alloy framework samples into generated markdown
+ */
+function processAlloySamples(docsDir: string, relativeSamplesDir: string) : void {
+    try {
+        new AlloySampleProcessor(docsDir, relativeSamplesDir).processSamples();
+    } catch (error) {
+        console.error(`Error processing alloy framework samples: ${relativeSamplesDir}`, error);
     }
 }

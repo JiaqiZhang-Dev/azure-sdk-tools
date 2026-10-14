@@ -1,0 +1,119 @@
+name: skill-authoring-trigger-eval
+description: Trigger and anti-trigger tests for the skill-authoring skill
+type: capability
+
+environment: azsdk-mcp-mock
+
+tags:
+  area: skill-authoring
+  type: ci-gate
+
+defaults:
+  runs: 1
+  timeout: "90s"
+  model: gpt-5.4
+  executor: copilot-sdk
+
+scoring:
+  threshold: 0.8
+
+stimuli:
+  # Should trigger
+  - name: trigger-create-a-new-skill
+    prompt: "create a new skill"
+    environment: &targetSkill
+      skills:
+        - ..
+    graders:
+      - type: skill-invocation
+        config:
+          required: ["skill-authoring"]
+
+  - name: trigger-write-a-skill-for-api-review
+    prompt: "write a skill for API review"
+    environment: *targetSkill
+    graders:
+      - type: skill-invocation
+        config:
+          required: ["skill-authoring"]
+
+  - name: trigger-what-is-the-skill-md-format
+    prompt: "what is the SKILL.md format"
+    environment: *targetSkill
+    graders:
+      - type: skill-invocation
+        config:
+          required: ["skill-authoring"]
+
+  - name: trigger-skill-template-structure
+    prompt: "skill template structure"
+    environment: *targetSkill
+    graders:
+      - type: skill-invocation
+        config:
+          required: ["skill-authoring"]
+
+  - name: trigger-review-my-skill-pr-for-compliance
+    prompt: "review my skill PR for compliance"
+    environment: *targetSkill
+    graders:
+      - type: skill-invocation
+        config:
+          required: ["skill-authoring"]
+
+  - name: trigger-skill-best-practices-and-token-budgets
+    prompt: "skill best practices and token budgets"
+    environment: *targetSkill
+    graders:
+      - type: skill-invocation
+        config:
+          required: ["skill-authoring"]
+
+  # Should NOT trigger
+  - name: anti-trigger-deploy-my-azure-function
+    prompt: "deploy my Azure Function"
+    environment: *targetSkill
+    graders:
+      - type: skill-invocation
+        config:
+          disallowed: ["skill-authoring"]
+
+  - name: anti-trigger-fix-my-pipeline-build-error
+    prompt: "fix my pipeline build error"
+    environment:
+      skills:
+        - ..
+        - ../../azsdk-common-pipeline-fixer
+    graders:
+      - type: skill-invocation
+        config:
+          required: ["azsdk-common-pipeline-fixer"]
+          disallowed: ["skill-authoring"]
+
+  - name: anti-trigger-authenticate-with-azure-ad
+    prompt: "authenticate with Azure AD"
+    environment: *targetSkill
+    graders:
+      - type: skill-invocation
+        config:
+          disallowed: ["skill-authoring"]
+
+  - name: anti-trigger-how-do-i-release-an-sdk-package
+    prompt: "Check release readiness and trigger the SDK release pipeline for release plan 12345."
+    environment:
+      skills:
+        - ..
+        - ../../azsdk-common-sdk-release
+    graders:
+      - type: skill-invocation
+        config:
+          required: ["azsdk-common-sdk-release"]
+          disallowed: ["skill-authoring"]
+
+  - name: anti-trigger-configure-azure-storage-geo-redundancy
+    prompt: "configure Azure Storage geo-redundancy"
+    environment: *targetSkill
+    graders:
+      - type: skill-invocation
+        config:
+          disallowed: ["skill-authoring"]

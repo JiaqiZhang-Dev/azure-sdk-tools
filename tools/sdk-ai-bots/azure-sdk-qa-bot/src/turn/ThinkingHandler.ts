@@ -65,15 +65,17 @@ export class ThinkingHandler {
   public async stop(replyStartTime: Date, reply: CompletionResponsePayload | RagApiError, currentPrompt: Prompt) {
     const { answer, isError } = this.generateAnswer(reply);
     const responseId = isCompletionResponsePayload(reply) ? reply.id : undefined;
+    const traceId = isCompletionResponsePayload(reply) ? reply.trace_id : undefined;
     const formattedAnswer = await this.formatAnswer(answer, isError);
     const entity: Record<string, unknown> = {
       ...this.aiGeneratedEntity,
     };
-    if (responseId) {
+    if (traceId || responseId) {
       entity.usageInfo = {
+        type: 'https://schema.org/Message',
         '@type': 'CreativeWork',
         name: 'Internal Tracking',
-        description: `Response ID: ${responseId}`,
+        description: traceId ? `Trace ID: ${traceId}` : `Response ID: ${responseId}`,
       };
     }
     const updated: Partial<TurnContext> = {

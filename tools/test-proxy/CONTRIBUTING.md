@@ -2,8 +2,6 @@
 
 Within this folder are all the components that make up the the tool `Azure.Sdk.Tools.TestProxy`, henceforth referred to as the `test-proxy`.
 
-This product is currently developed on Visual Studio 2022, but CLI build/test also work fine. Currently, this project only supports .NET 6.0, though .NET 7.0 support is coming.
-
 To contribute a change:
 
 - Fork.
@@ -11,6 +9,15 @@ To contribute a change:
 - Locally test your change, add a unit test, commit.
 - Submit a PR to this repo from your forked branch!
   - Relevant azure-sdk devs will review your PR.
+- (optional) Perform cross-repo testing and initiate release
+
+## Table of contents
+
+- [Directory Guide](#directory-guide)
+- [Tool structure](#tool-structure)
+- [Testing](#testing)
+- [Release](#release)
+- [Gotchas](#gotchas)
 
 ## Directory Guide
 
@@ -93,6 +100,14 @@ As mentioned in the table before, the tests for this project reside within `Azur
 
 The tests marked with trait `Integration` are gated on access to a private github repo that is used for the purpose. Feel free to replace the target repo `Azure/azure-sdk-assets-integration` with your _own_ repo, as that will absolutely work. However that could be quite painful with the number of tests.
 
+## Release
+
+To release test-proxy after merging your changes, manually run the [proxy release pipeline](https://dev.azure.com/azure-sdk/internal/_build?definitionId=2660). After the `BuildTestAndPackage` stage runs succesfully, the `Release` stage will be queued and await manual approval.
+
+Approving the release stage will sign the package and publish it to [github releases](https://github.com/Azure/azure-sdk-tools/releases?q=Azure.Sdk.Tools.TestProxy&expanded=true) and the [azure-sdk-for-net devops feed](https://dev.azure.com/azure-sdk/public/_artifacts/feed/azure-sdk-for-net/NuGet/Azure.Sdk.Tools.TestProxy/overview).
+
+After publishing, take the new version and update the [target_version.txt](https://github.com/Azure/azure-sdk-tools/blob/main/eng/common/testproxy/target_version.txt) file, then put up a PR against the azure-sdk-tools repository. This PR will trigger the [eng/common sync pipeline](https://github.com/Azure/azure-sdk-tools/blob/main/doc/common/common_engsys.md) which will sync the version change out to the other SDK repositories, and auto-trigger CI and live tests which will be posted as a comment on the PR. Check the status of these tests, and perform any other potential manual testing against non-tested repositories, then complete the [sync pipeline merge process](https://github.com/Azure/azure-sdk-tools/blob/main/doc/common/common_engsys.md#engcommon-sync).
+
 ## Gotchas
 
 When opening the project in VS2022, you may see the following:
@@ -113,9 +128,9 @@ dotnet --list-sdks
 7.0.101 [C:\Program Files\dotnet\sdk]
 ```
 
-Find a version starting with a `6`, if you don't have one on your system, [install it!](https://dotnet.microsoft.com/en-us/download/dotnet/6.0)
+Find a version starting with a `6`, if you don't have one on your system, [install it!](https://dotnet.microsoft.com/download/dotnet/6.0)
 
-Once you have that, find the [`global.json`](https://learn.microsoft.com/en-us/dotnet/core/tools/global-json) at root of this repo.
+Once you have that, find the [`global.json`](https://learn.microsoft.com/dotnet/core/tools/global-json) at root of this repo.
 
 ```json
 {

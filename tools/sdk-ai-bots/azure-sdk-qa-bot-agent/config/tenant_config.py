@@ -14,6 +14,7 @@ from __future__ import annotations
 from dataclasses import dataclass, field
 from enum import Enum
 from pathlib import Path
+from urllib.parse import quote
 
 from models.knowledge import KnowledgeSource, _trim_file_format
 
@@ -24,6 +25,7 @@ from models.knowledge import KnowledgeSource, _trim_file_format
 
 class TenantID(str, Enum):
     TYPESPEC_CHANNEL_QA_BOT = "typespec_channel_qa_bot"
+    TYPESPEC_EMITTER_QA_BOT = "typespec_emitter_qa_bot"
     PYTHON_CHANNEL_QA_BOT = "python_channel_qa_bot"
     DOTNET_CHANNEL_QA_BOT = "dotnet_channel_qa_bot"
     GOLANG_CHANNEL_QA_BOT = "golang_channel_qa_bot"
@@ -33,6 +35,8 @@ class TenantID(str, Enum):
     AZURE_SDK_ONBOARDING = "azure_sdk_onboarding"
     AZURE_TYPESPEC_AUTHORING = "azure_typespec_authoring"
     API_SPEC_REVIEW_BOT = "api_spec_review_bot"
+    AZURE_MCP_SERVER = "azure_mcp_server"
+    AZSDK_TOOLS_AGENT_QA_BOT = "azsdk_tools_agent_qa_bot"
     AZURE_SDK_QA_BOT = "azure_sdk_qa_bot"
     DIGITAL_AVATAR_JAY_PARIKH = "digital_avatar_jay_parikh"
 
@@ -44,12 +48,18 @@ class TenantID(str, Enum):
 # -- TypeSpec --
 SRC_TYPESPEC_DOCS = "typespec_docs"
 SRC_TYPESPEC_AZURE_DOCS = "typespec_azure_docs"
+SRC_TYPESPEC_AZURE_SAMPLES = "typespec_azure_samples"
 SRC_TYPESPEC_AZURE_HTTP_SPECS = "typespec_azure_http_specs"
 SRC_TYPESPEC_HTTP_SPECS = "typespec_http_specs"
 SRC_STATIC_TYPESPEC_QA = "static_typespec_qa"
 SRC_STATIC_TYPESPEC_MIGRATION_DOCS = "static_typespec_migration_docs"
 SRC_STATIC_TYPESPEC_TO_SWAGGER_MAPPING = "static_typespec_to_swagger_mapping"
 SRC_TYPESPEC_AZURE_RESOURCE_MANAGER_LIB = "typespec-azure-resource-manager-lib"
+SRC_TYPESPEC_AZURE_PROVIDERHUB_DOCS = "typespec_azure_providerhub_docs"
+
+# -- Emitter framework (EF v2) / Alloy --
+SRC_ALLOY_FRAMEWORK_DOCS = "alloy_framework_docs"
+SRC_ALLOY_FRAMEWORK_SAMPLES = "alloy_framework_samples"
 
 # -- Azure Guidelines & Standards --
 SRC_AZURE_API_GUIDELINES = "azure_api_guidelines"
@@ -57,10 +67,10 @@ SRC_AZURE_RESOURCE_MANAGER_RPC = "azure_resource_manager_rpc"
 SRC_AZURE_REST_API_SPECS_WIKI = "azure_rest_api_specs_wiki"
 SRC_AZURE_REST_API_SPECS_DOCS = "azure_rest_api_specs_docs"
 SRC_AZURE_OPENAPI_DIFF_DOCS = "azure_openapi_diff_docs"
+SRC_STATIC_CPEX_DOCS = "static_cpex_docs"
 
 # -- SDK language docs --
 SRC_AZURE_SDK_FOR_PYTHON_DOCS = "azure_sdk_for_python_docs"
-SRC_AZURE_SDK_FOR_PYTHON_WIKI = "azure_sdk_for_python_wiki"
 SRC_AZURE_SDK_FOR_NET_DOCS = "azure_sdk_for_net_docs"
 SRC_AZURE_SDK_FOR_GO_DOCS = "azure_sdk_for_go_docs"
 SRC_AZURE_SDK_FOR_JAVA_DOCS = "azure_sdk_for_java_docs"
@@ -74,10 +84,17 @@ SRC_AZURE_SDK_GUIDELINES = "azure-sdk-guidelines"
 SRC_AZURE_SDK_DOCS_ENG = "azure-sdk-docs-eng"
 SRC_AZURE_SDK_INTERNAL_WIKI = "azure-sdk-internal-wiki"
 
+# -- SDK tools --
+SRC_AZURE_SDK_TOOLS_DOCS = "azure_sdk_tools_docs"
+SRC_AZSDK_CLI_DOCS = "azsdk_cli_docs"
+
+# -- Azure MCP Server --
+SRC_AZURE_MCP_SERVER_DOCS = "azure_mcp_server_docs"
+
 # -- General Azure & review resources --
 SRC_STATIC_AZURE_DOCS = "static_azure_docs"
 SRC_STATIC_API_SPEC_VIEW_QA = "static_api_spec_view_qa"
-
+SRC_STATIC_ARM_DOCS = "static_arm_docs"
 
 # ---------------------------------------------------------------------------
 # Global knowledge source registry
@@ -105,6 +122,12 @@ _register(
         name=SRC_TYPESPEC_AZURE_DOCS,
         description="Azure-specific TypeSpec documentation, patterns, and templates for management and data-plane services.",
         base_url="https://azure.github.io/typespec-azure/docs/",
+        trim_format=True,
+    ),
+    KnowledgeSource(
+        name=SRC_TYPESPEC_AZURE_SAMPLES,
+        description="Azure TypeSpec samples covering common ARM and data-plane patterns, useful as references when building similar scenarios.",
+        base_url="https://azure.github.io/typespec-azure/docs/samples/",
         trim_format=True,
     ),
     KnowledgeSource(
@@ -141,6 +164,28 @@ _register(
         trim_format=True,
         suffix=".tsp",
     ),
+    KnowledgeSource(
+        name=SRC_TYPESPEC_AZURE_PROVIDERHUB_DOCS,
+        description="Documentation for Azure TypeSpec ProviderHub.",
+        base_url="https://github.com/Azure/typespec-azure-pr/blob/providerhub/",
+    ),
+    # -- Emitter framework (EF v2) / Alloy --
+    KnowledgeSource(
+        name=SRC_ALLOY_FRAMEWORK_DOCS,
+        description="Guides for the Alloy code generation framework that the TypeSpec emitter framework (EF v2) is built on: component model, reactivity, symbols and references, source file/directory rendering, formatting, and debugging emitter output. Search this source for questions about writing a new TypeSpec emitter with alloy or EF v2.",
+        link_fn=lambda title: "https://alloy-framework.github.io/alloy/"
+        + (
+            ""
+            if _trim_file_format(title.replace("#", "/")) == "index"
+            else _trim_file_format(title.replace("#", "/"))
+        ),
+    ),
+    KnowledgeSource(
+        name=SRC_ALLOY_FRAMEWORK_SAMPLES,
+        description="Full source code of the official Alloy framework sample projects, including an end-to-end client emitter, a basic project, a scaffold generator, and Go/Python emitter examples. Use these as reference implementations when someone asks how to start building an emitter with alloy or the emitter framework.",
+        base_url="https://github.com/alloy-framework/alloy/tree/main/samples/",
+        trim_format=True,
+    ),
     # -- Azure Guidelines & Standards --
     KnowledgeSource(
         name=SRC_AZURE_API_GUIDELINES,
@@ -168,17 +213,17 @@ _register(
         description="OpenAPI diff documentation for detecting and managing breaking changes in API specifications.",
         base_url="https://github.com/Azure/openapi-diff/blob/main/",
     ),
+    KnowledgeSource(
+        name=SRC_STATIC_CPEX_DOCS,
+        description="Cloud Product Excellence (CPEX) documentation covering Azure-branded product lifecycle management, breaking change policy and process guidance, API breaking changes, S360 KPI requirements, preview/GA readiness, and retirement guidance.",
+        base_url="https://eng.ms/docs/cloud-ai-platform/azure-core/azure-core-product/azure-product-lifecycle-management-plm/azure-product-lifecycle-management/cpex/media/",
+        trim_format=True,
+    ),
     # -- SDK language docs --
     KnowledgeSource(
         name=SRC_AZURE_SDK_FOR_PYTHON_DOCS,
         description="Azure SDK for Python documentation covering installation, usage patterns, and API reference.",
         base_url="https://github.com/Azure/azure-sdk-for-python/blob/main/doc/",
-    ),
-    KnowledgeSource(
-        name=SRC_AZURE_SDK_FOR_PYTHON_WIKI,
-        description="Azure SDK for Python wiki with guides, troubleshooting, and development best practices.",
-        base_url="https://github.com/Azure/azure-sdk-for-python/wiki/",
-        trim_format=True,
     ),
     KnowledgeSource(
         name=SRC_AZURE_SDK_FOR_NET_DOCS,
@@ -225,7 +270,7 @@ _register(
     ),
     KnowledgeSource(
         name=SRC_AZURE_SDK_DOCS_ENG,
-        description="Azure SDK engineering documentation covering onboarding, release processes, and engineering systems.",
+        description="Internal Azure SDK engineering documentation for onboarding, releases, engineering systems, and Azure MCP guidance.",
         link_fn=lambda title: (
             "https://eng.ms/docs/products/azure-developer-experience"
             if _trim_file_format(title.replace("#", "/")) == "index"
@@ -239,22 +284,41 @@ _register(
         link_fn=lambda title: (
             "https://dev.azure.com/azure-sdk/internal/_wiki/wikis/internal.wiki"
             "?wikiVersion=GBwikiMaster&pagePath=/"
-            + _trim_file_format(title.replace("#", "/"))
+            + quote(_trim_file_format(title.replace("#", "/")), safe="/")
         ),
     ),
     # -- General Azure & review resources --
     KnowledgeSource(
         name=SRC_STATIC_AZURE_DOCS,
         description="Static Azure documentation and reference materials for general Azure services.",
-        link_fn=lambda title: (
-            "http://aka.ms/azbreakingchangespolicy"
-            if title == "Azure Versioning and Breaking Changes Policy V1.3.2"
-            else ""
-        ),
     ),
     KnowledgeSource(
         name=SRC_STATIC_API_SPEC_VIEW_QA,
         description="Historical Q&A for API specification review covering common validation errors and fixes.",
+    ),
+    KnowledgeSource(
+        name=SRC_STATIC_ARM_DOCS,
+        description="ARM Wiki (RPaaS) documentation for ARM resource modeling, OpenAPI/TypeSpec onboarding, and related RP platform guidance.",
+        base_url="https://armwiki.azurewebsites.net/rpaas/",
+        trim_format=True,
+        suffix=".html",
+    ),
+    # -- SDK tools --
+    KnowledgeSource(
+        name=SRC_AZURE_SDK_TOOLS_DOCS,
+        description="Azure SDK tools documentation covering js-sdk-release-tools and related JavaScript SDK tooling.",
+        base_url="https://github.com/Azure/azure-sdk-for-js/blob/main/",
+    ),
+    # -- Azure MCP Server --
+    KnowledgeSource(
+        name=SRC_AZURE_MCP_SERVER_DOCS,
+        description="Curated Azure MCP Server documentation and team Q&A covering setup, authentication, onboarding and merge practices, support history, troubleshooting, and release changes.",
+        base_url="https://github.com/microsoft/mcp/blob/main/",
+    ),
+    KnowledgeSource(
+        name=SRC_AZSDK_CLI_DOCS,
+        description="Azure SDK CLI (azsdk) agent documentation: CLI command guidelines, MCP tools reference, design specs, and custom-agent and skills authoring guidelines for the Azure SDK Tools Agent. Use for questions about what the agent/CLI can do, MCP tool behavior, design/architecture, and agent/skill development.",
+        base_url="https://github.com/Azure/azure-sdk-tools/blob/main/",
     ),
 )
 
@@ -270,6 +334,15 @@ def get_knowledge_source(name: str) -> KnowledgeSource | None:
 
 
 @dataclass(frozen=True)
+class AgentConfig:
+    """Hosted agent assignment for a tenant."""
+
+    name: str = "azure-sdk-chat-agent"
+    name_config_key: str = "AI_FOUNDRY_AGENT_NAME"
+    version_config_key: str = "AI_FOUNDRY_AGENT_VERSION"
+
+
+@dataclass(frozen=True)
 class TenantConfig:
     """Per-tenant configuration.
 
@@ -279,10 +352,12 @@ class TenantConfig:
     ``sources`` is an ordered list of :class:`KnowledgeSource` objects
     available to this tenant.  Each source carries its own description and
     default filter; tenants can override a source's filter via
-    ``source_filter``.
+    ``source_filter``. ``enable_wiki_cross_document_pages`` controls access to
+    synthesized entity and concept pages, which are not knowledge sources.
     """
 
     display_name: str = ""
+    skill_name: str = ""
     scope: str = ""
     topics: list[str] = field(default_factory=list)
     exclusions: list[str] = field(default_factory=list)
@@ -294,6 +369,8 @@ class TenantConfig:
     """If set, ChatService calls this Foundry prompt agent directly and
     skips tenant/memory system message injection and reference enrichment.
     Use for pure-passthrough tenants backed by a portal-configured prompt agent."""
+    agent: AgentConfig = field(default_factory=AgentConfig)
+    enable_wiki_cross_document_pages: bool = True
 
 
 # ---------------------------------------------------------------------------
@@ -320,6 +397,7 @@ _TYPESPEC_SOURCES = _sources(
     SRC_AZURE_RESOURCE_MANAGER_RPC,
     SRC_AZURE_API_GUIDELINES,
     SRC_TYPESPEC_AZURE_DOCS,
+    SRC_TYPESPEC_AZURE_SAMPLES,
     SRC_STATIC_TYPESPEC_QA,
     SRC_TYPESPEC_AZURE_HTTP_SPECS,
     SRC_TYPESPEC_DOCS,
@@ -328,12 +406,15 @@ _TYPESPEC_SOURCES = _sources(
     SRC_TYPESPEC_HTTP_SPECS,
     SRC_STATIC_AZURE_DOCS,
     SRC_STATIC_TYPESPEC_TO_SWAGGER_MAPPING,
+    SRC_TYPESPEC_AZURE_PROVIDERHUB_DOCS,
+    SRC_STATIC_ARM_DOCS,
 )
 
 _AZURE_TYPESPEC_AUTHORING_SOURCES = _sources(
     SRC_AZURE_API_GUIDELINES,
     SRC_AZURE_RESOURCE_MANAGER_RPC,
     SRC_TYPESPEC_AZURE_DOCS,
+    SRC_TYPESPEC_AZURE_SAMPLES,
     SRC_STATIC_TYPESPEC_QA,
     SRC_TYPESPEC_AZURE_HTTP_SPECS,
     SRC_TYPESPEC_DOCS,
@@ -351,6 +432,7 @@ _AZURE_TYPESPEC_AUTHORING_SOURCES = _sources(
 _TENANT_CONFIG_MAP: dict[TenantID, TenantConfig] = {
     TenantID.PYTHON_CHANNEL_QA_BOT: TenantConfig(
         display_name="Python SDK",
+        skill_name="python-sdk",
         scope="Python SDK generation, validation, testing, release, and pipeline/CI/CD issues.",
         topics=[
             "Python SDK generation and validation errors",
@@ -359,7 +441,6 @@ _TENANT_CONFIG_MAP: dict[TenantID, TenantConfig] = {
         ],
         sources=_sources(
             SRC_AZURE_SDK_FOR_PYTHON_DOCS,
-            SRC_AZURE_SDK_FOR_PYTHON_WIKI,
             SRC_AZURE_SDK_GUIDELINES,
             SRC_AZURE_SDK_DOCS_ENG,
             SRC_AZURE_SDK_INTERNAL_WIKI,
@@ -375,6 +456,7 @@ _TENANT_CONFIG_MAP: dict[TenantID, TenantConfig] = {
     ),
     TenantID.DOTNET_CHANNEL_QA_BOT: TenantConfig(
         display_name=".NET (C#) SDK",
+        skill_name="dotnet-sdk",
         scope=".NET SDK generation, validation, testing, release, and pipeline/CI/CD issues.",
         topics=[
             ".NET/C# SDK generation and validation errors",
@@ -397,6 +479,7 @@ _TENANT_CONFIG_MAP: dict[TenantID, TenantConfig] = {
     ),
     TenantID.GOLANG_CHANNEL_QA_BOT: TenantConfig(
         display_name="Go SDK",
+        skill_name="go-sdk",
         scope="Go SDK generation, validation, testing, release, and pipeline/CI/CD issues.",
         topics=[
             "Go SDK generation and validation errors",
@@ -419,6 +502,7 @@ _TENANT_CONFIG_MAP: dict[TenantID, TenantConfig] = {
     ),
     TenantID.JAVA_CHANNEL_QA_BOT: TenantConfig(
         display_name="Java SDK",
+        skill_name="java-sdk",
         scope="Java SDK generation, validation, testing, release, and pipeline/CI/CD issues.",
         topics=[
             "Java SDK generation and validation errors",
@@ -443,6 +527,7 @@ _TENANT_CONFIG_MAP: dict[TenantID, TenantConfig] = {
     ),
     TenantID.JAVASCRIPT_CHANNEL_QA_BOT: TenantConfig(
         display_name="JavaScript SDK",
+        skill_name="javascript-sdk",
         scope="JavaScript/TypeScript SDK generation, validation, testing, release, and pipeline/CI/CD issues.",
         topics=[
             "JavaScript/TypeScript SDK generation and validation errors",
@@ -456,6 +541,7 @@ _TENANT_CONFIG_MAP: dict[TenantID, TenantConfig] = {
             SRC_AZURE_SDK_DOCS_ENG,
             SRC_TYPESPEC_AZURE_DOCS,
             SRC_AZURE_REST_API_SPECS_WIKI,
+            SRC_AZURE_SDK_TOOLS_DOCS,
         ),
         source_filter={
             SRC_AZURE_SDK_GUIDELINES: "search.ismatch('typescript', 'title')",
@@ -466,6 +552,7 @@ _TENANT_CONFIG_MAP: dict[TenantID, TenantConfig] = {
     ),
     TenantID.TYPESPEC_CHANNEL_QA_BOT: TenantConfig(
         display_name="TypeSpec",
+        skill_name="typespec",
         scope="TypeSpec authoring, TypeSpec validation, and Azure API design.",
         topics=[
             "TypeSpec syntax, decorators, models, operations usage",
@@ -476,30 +563,59 @@ _TENANT_CONFIG_MAP: dict[TenantID, TenantConfig] = {
             "Client customization for SDKs (even if a specific language is mentioned, if the core topic is TypeSpec authoring)",
             "API design guidelines and best practices",
         ],
-        sources=[*_TYPESPEC_SOURCES, *_sources(SRC_AZURE_SDK_DOCS_ENG)],
+        sources=[*_TYPESPEC_SOURCES, *_sources(SRC_AZURE_SDK_DOCS_ENG, SRC_STATIC_CPEX_DOCS)],
         source_filter={
             SRC_AZURE_SDK_DOCS_ENG: "search.ismatch('design*', 'title')",
+            SRC_STATIC_CPEX_DOCS: "search.ismatch('/.*breaking.*/', 'title', 'full', 'any')",
         },
         qa_guideline_file="tenants/typespec.md",
         enable_routing=True,
     ),
+    TenantID.TYPESPEC_EMITTER_QA_BOT: TenantConfig(
+        display_name="Alloy Framework (Test)",
+        skill_name="alloy-framework-test",
+        scope="TypeSpec emitter framework (EF v2) and Alloy framework implementation guidance for Azure SDK developers.",
+        topics=[
+            "Getting started with the Alloy framework for TypeSpec emitters",
+            "Emitter framework (EF v2) architecture and implementation patterns",
+            "Reference implementations from official Alloy sample emitters",
+        ],
+        sources=_sources(
+            SRC_TYPESPEC_DOCS,
+            SRC_ALLOY_FRAMEWORK_DOCS,
+            SRC_ALLOY_FRAMEWORK_SAMPLES,
+        ),
+        source_filter={
+            SRC_TYPESPEC_DOCS: "search.ismatch('/.*extending-typespec.*emitter-framework.*/', 'title', 'full', 'any')",
+        },
+        qa_guideline_file="tenants/typespec.md",
+    ),
     TenantID.AZURE_SDK_ONBOARDING: TenantConfig(
         display_name="Azure SDK Onboarding",
-        scope="Azure API specification & SDK onboarding process, SDK lifecycle, Azure MCP, and retirement processes.",
+        skill_name="sdk-onboarding",
+        scope="Azure API specification and SDK onboarding, release plan lifecycle, Azure MCP, and retirement processes.",
         topics=[
             "Prerequisites and setup for onboarding Azure API or SDK",
             "Permission issues for specification repo or SDK repo access, workflow visibility",
+            "Release plan creation, status, readiness, lifecycle, and troubleshooting",
             "SDK development, SDK generation (reproduce SDK validation locally), SDK release tooling and guidance",
             "Service, API and SDK deprecation guidance",
             "API documentation publishing",
             "AzSDK agent, Azure MCP tool usage guidance",
             "Creating new service based on TypeSpec or OpenAPI (Swagger)",
         ],
-        sources=_sources(SRC_AZURE_SDK_DOCS_ENG),
+        exclusions=[
+            "API specification authoring, PR review, validation, or merge questions — route to api_spec_review_bot",
+        ],
+        sources=_sources(
+            SRC_AZURE_SDK_DOCS_ENG,
+            SRC_STATIC_CPEX_DOCS,
+        ),
         qa_guideline_file="tenants/azure_sdk_onboarding.md",
     ),
     TenantID.AZURE_TYPESPEC_AUTHORING: TenantConfig(
         display_name="Azure TypeSpec Authoring",
+        skill_name="typespec-authoring",
         scope="Advanced TypeSpec authoring for ARM and data-plane API design.",
         topics=[
             "TypeSpec language, syntax, decorators, Azure patterns",
@@ -511,9 +627,11 @@ _TENANT_CONFIG_MAP: dict[TenantID, TenantConfig] = {
     ),
     TenantID.API_SPEC_REVIEW_BOT: TenantConfig(
         display_name="API Spec Review",
+        skill_name="api-spec-review",
         scope="Azure REST API specification PR review process and failing checks (not API design questions).",
         topics=[
             "Specification PR review process in azure-rest-api-specs and azure-rest-api-specs-pr repositories",
+            "Specification PR authoring requirements, validation, review status, scheduling, blockers, and merge process",
             "How to fix specification PR pipeline errors, SDK validation errors, check failures or CI failures",
             "How to suppress specification PR pipeline errors, SDK validation errors, check failures or CI failures",
         ],
@@ -530,15 +648,66 @@ _TENANT_CONFIG_MAP: dict[TenantID, TenantConfig] = {
             SRC_AZURE_REST_API_SPECS_DOCS,
             SRC_AZURE_OPENAPI_DIFF_DOCS,
             SRC_AZURE_SDK_DOCS_ENG,
+            SRC_STATIC_ARM_DOCS,
+            SRC_STATIC_CPEX_DOCS,
+            SRC_AZURE_SDK_INTERNAL_WIKI,
         ),
         source_filter={
             SRC_AZURE_SDK_DOCS_ENG: "search.ismatch('design*', 'title')",
+            SRC_STATIC_CPEX_DOCS: "search.ismatch('/.*breaking.*/', 'title', 'full', 'any')",
         },
         qa_guideline_file="tenants/api_spec_review.md",
         enable_routing=True,
     ),
+    TenantID.AZURE_MCP_SERVER: TenantConfig(
+        display_name="Azure MCP Server",
+        skill_name="azure-mcp-server",
+        scope="Azure MCP Server setup, usage, service onboarding, authentication, remote hosting, troubleshooting, support, and contribution workflows.",
+        topics=[
+            "Azure MCP Server installation, configuration, commands, and troubleshooting",
+            "Authentication for local, remote, OBO, user, and service-principal scenarios",
+            "Service onboarding, tool design, pull requests, and integration testing",
+            "Remote or managed hosting options and production integration",
+            "Azure MCP Server telemetry, support, known issues, and release changes",
+            "Azure Skills and Azure MCP Server capability boundaries",
+        ],
+        sources=_sources(SRC_AZURE_MCP_SERVER_DOCS, SRC_AZURE_SDK_DOCS_ENG),
+        source_filter={
+            SRC_AZURE_SDK_DOCS_ENG: "search.ismatch('mcp*', 'title')",
+        },
+        enable_routing=False,
+        agent=AgentConfig(
+            name="azure-mcp-server-agent",
+            name_config_key="AZURE_MCP_SERVER_AGENT_NAME",
+            version_config_key="AZURE_MCP_SERVER_AGENT_VERSION",
+        ),
+    ),
+    TenantID.AZSDK_TOOLS_AGENT_QA_BOT: TenantConfig(
+        display_name="AzSDK Tools Agent",
+        skill_name="azsdk-tools-agent",
+        scope=(
+            "Azure SDK Tools Agent (azsdk CLI/MCP) usage and troubleshooting: agent/MCP "
+            "setup and reliability, tool capabilities, and authoring azsdk CLI tools and skills."
+        ),
+        topics=[
+            "azsdk CLI / MCP server setup, connection, and reliability (mcp.json, VS Code / Copilot CLI, cold-start/timeout)",
+            "Azure SDK Tools Agent capabilities and tool usage (generation, validation, review, release)",
+            "Triage errors reported by the agent and route downstream failures to the appropriate specialist",
+            "Authoring azsdk CLI tools and skills (custom agents, CLI command and skill guidelines)",
+        ],
+        exclusions=[
+            "Release plan creation, status, readiness, and lifecycle questions — route to azure_sdk_onboarding; issues using or debugging an azsdk release-plan tool remain in this tenant",
+        ],
+        sources=_sources(
+            SRC_AZSDK_CLI_DOCS,
+            SRC_AZURE_SDK_DOCS_ENG,
+            SRC_AZURE_SDK_INTERNAL_WIKI,
+        ),
+        qa_guideline_file="tenants/azsdk_tools_agent.md",
+    ),
     TenantID.GENERAL_QA_BOT: TenantConfig(
         display_name="General",
+        skill_name="general-azure-sdk",
         scope="Questions that don't clearly fit any single domain above. General specialist with all knowledge sources.",
         qa_guideline_file="tenants/general.md",
         enable_routing=True,
@@ -568,16 +737,23 @@ _PROMPTS_DIR = Path(__file__).resolve().parent.parent / "prompts"
 
 def get_tenant_config(tenant_id: TenantID) -> TenantConfig | None:
     """Return the config for *tenant_id*, or ``None`` if unknown."""
-    try:
-        tid = TenantID(tenant_id)
-    except ValueError:
-        return None
-    return _TENANT_CONFIG_MAP.get(tid)
+    return _TENANT_CONFIG_MAP.get(tenant_id)
 
 
 def get_all_tenant_ids() -> list[str]:
     """Return all registered tenant ID strings."""
     return [t.value for t in _TENANT_CONFIG_MAP]
+
+
+def get_tenant_skill_map() -> dict[TenantID, str]:
+    """Return a mapping from TenantID to skill name (kebab-case).
+
+    Derived from the ``skill_name`` field in each TenantConfig.
+    Only includes tenants that have a skill_name configured.
+    """
+    return {
+        tid: cfg.skill_name for tid, cfg in _TENANT_CONFIG_MAP.items() if cfg.skill_name
+    }
 
 
 def get_tenant_sources_display(tenant_id: TenantID) -> list[dict[str, str]]:
@@ -602,7 +778,10 @@ def load_tenant_qa_guideline(tenant_id: TenantID) -> str:
     guideline_path = _PROMPTS_DIR / config.qa_guideline_file
     if not guideline_path.exists():
         return ""
-    return guideline_path.read_text(encoding="utf-8").strip()
+    content = guideline_path.read_text(encoding="utf-8").strip()
+    # Substitute dynamic parameters
+    content = content.replace("{{tenant_id}}", tenant_id.value)
+    return content
 
 
 def get_tenant_scope_description(tenant_id: TenantID) -> str:

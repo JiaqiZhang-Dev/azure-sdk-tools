@@ -10,6 +10,8 @@ namespace AzureSdkQaBot;
 
 @doc("Message roles in the conversation")
 union Role {
+  string,
+  
   @doc("User message")
   User: "user",
 
@@ -57,6 +59,9 @@ union ConversationType {
 
 @doc("A message in the conversation")
 model Message {
+  @doc("Optional message identifier")
+  id?: string;
+
   @doc("The role of the message sender")
   role: Role;
 
@@ -132,6 +137,9 @@ model ChatResponse {
   @doc("The full context used to generate the answer")
   full_context?: string;
 
+  @doc("Whether the agent produced a non-empty answer")
+  has_result: boolean;
+
   @doc("The tenant ID the question is routed to")
   route_tenant?: string;
 }
@@ -145,6 +153,12 @@ model FeedbackRequest {
 
   @doc("The tenant ID")
   tenant_id?: string;
+
+  @doc("Exact conversation/thread identifier used to store messages")
+  conversation_id?: string;
+
+  @doc("The conversation type")
+  conversation_type?: ConversationType;
 
   @doc("User's reaction to the conversation")
   reaction?: Reaction;
@@ -211,6 +225,9 @@ model ConversationMessage {
   @doc("Conversation type")
   conversation_type?: ConversationType;
 
+  @doc("Whether the message passed intention recognition (in bot scope)")
+  should_reply?: boolean;
+
   @doc("Additional message metadata")
   extra_info?: ConversationMessageExtraInfo;
 }
@@ -241,6 +258,41 @@ model IntentionResponse {
 
   @doc("The reason for the classification decision")
   reason: string;
+}
+
+// ── Knowledge Models ─────────────────────────────────────────
+
+@doc("Request for knowledge retrieval")
+model KnowledgeRetrieveRequest {
+  @doc("The tenant ID")
+  tenant_id: string;
+
+  @doc("The user query")
+  query: string;
+
+  @doc("The service type, it can be management-plane or data-plane")
+  serviceType?: string;
+
+  @doc("The search mode, it can be quick or deep.")
+  searchModel?: string;
+
+  @doc("Optional user id")
+  userId?: string;
+
+  @doc("List of knowledge source to search.")
+  sources?: string[];
+
+  @doc("The top K number of knowledge items to retrieve")
+  top_k?: int32;
+}
+
+@doc("Response from knowledge retrieval.")
+model KnowledgeRetrieveResponse {
+  @doc("Whether the agent response with knowledge")
+  has_result: boolean;
+
+  @doc("The knowledge list retrieved.")
+  knowledge_list?: Reference[];
 }
 
 // ── Health Check ─────────────────────────────────────────────
